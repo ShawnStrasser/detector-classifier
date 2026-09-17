@@ -135,6 +135,12 @@ Input columns `DeviceId, Timestamp, EventId, Parameter` (or `device_id, timestam
 parameter`), one or many signals, minutes to days. Models load from `models/beta_v0/`; no absolute
 paths. Smoke test: `python tests/test_predict_smoke.py`.
 
+**No lightgbm / scipy needed.** The three boosters are plain-text tree files; `src/lgbm_numpy.py` evaluates them with
+numpy only. `predict()` uses lightgbm if it is installed and otherwise falls back to numpy automatically (force it with
+`--no-lightgbm`, `predict.set_backend("numpy")` or env `DC_BOOSTER=numpy`). Output is identical (max probability
+difference 0.0 on 19 signals x 24 h, 420 detectors) and the speed is the same (6.1 s vs 6.2 s).
+`tests/test_numpy_backend.py` checks the match and runs the pipeline with lightgbm, scipy and sklearn blocked.
+
 ## Using the output (one row per detector channel)
 
 `phase_pred, phase_prob, phase_2nd, phase_2nd_prob, function_pred, function_prob, status,

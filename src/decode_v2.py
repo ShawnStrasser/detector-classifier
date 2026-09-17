@@ -28,7 +28,10 @@ import sys
 import time
 from pathlib import Path
 
-import lightgbm as lgb
+try:                                   # only needed for training, not for inference
+    import lightgbm as lgb
+except ImportError:
+    lgb = None
 import numpy as np
 import pandas as pd
 

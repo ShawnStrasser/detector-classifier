@@ -1,7 +1,8 @@
 # Everything src/predict.py needs to turn raw hi-res events into detector predictions.
-# CPU only; no torch, no sklearn, no atspm.
+# CPU only; no torch, no sklearn, no scipy, no atspm.
 duckdb>=1.0
 pandas>=2.0
 numpy>=1.24
 pyarrow>=14.0
-lightgbm>=4.0
+# Optional: lightgbm>=4.0 (pulls in scipy). If it is not installed, predict.py scores the same model files
+# with the built-in pure-numpy tree evaluator (src/lgbm_numpy.py) - identical output, same speed.

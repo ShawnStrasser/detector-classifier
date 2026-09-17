@@ -51,8 +51,9 @@ import tempfile
 import time
 from pathlib import Path
 
+import os
+
 import duckdb
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
@@ -95,6 +96,31 @@ LOW_MINUTES = 10.0
 LOW_CONF = 0.5
 
 _VERBOSE = False
+
+
+
+# ---- model backend: "lightgbm" (needs lightgbm + scipy) or "numpy" (pure numpy, identical output) ----
+_BACKEND = os.environ.get("DC_BOOSTER", "auto").lower()
+
+
+def set_backend(name: str) -> None:
+    """'auto' (lightgbm if installed, else numpy), 'lightgbm' or 'numpy'."""
+    global _BACKEND
+    if name not in ("auto", "lightgbm", "numpy"):
+        raise ValueError(name)
+    _BACKEND = name
+
+
+def _load_booster(path):
+    if _BACKEND in ("auto", "lightgbm"):
+        try:
+            import lightgbm as lgb
+            return lgb.Booster(model_file=str(path))
+        except ImportError:
+            if _BACKEND == "lightgbm":
+                raise
+    from lgbm_numpy import NumpyBooster
+    return NumpyBooster(path)
 
 
 def log(m):
@@ -368,7 +394,7 @@ def _normalise_by_detector(df: pd.DataFrame, s: np.ndarray) -> np.ndarray:
 
 def score(df: pd.DataFrame, sim: pd.DataFrame, model_dir: Path) -> pd.DataFrame:
     meta = json.load(open(model_dir / "phase_lgbm_v2.json"))
-    bst = lgb.Booster(model_file=str(model_dir / "phase_lgbm_v2.txt"))
+    bst = _load_booster(model_dir / "phase_lgbm_v2.txt")
     for c in meta["features"]:
         if c not in df.columns:
             df[c] = np.nan
@@ -376,7 +402,7 @@ def score(df: pd.DataFrame, sim: pd.DataFrame, model_dir: Path) -> pd.DataFrame:
     df["p0"] = _softmax_by_detector(df, np.asarray(bst.predict(df[meta["features"]])))
 
     dmeta = json.load(open(model_dir / "decode_lgbm_v2.json"))
-    dbst = lgb.Booster(model_file=str(model_dir / "decode_lgbm_v2.txt"))
+    dbst = _load_booster(model_dir / "decode_lgbm_v2.txt")
     X = dec.assemble(df[["DeviceId", "Detector", "win", "cand_phase", "p0"]], pairs=df, sim=sim)
     for c in dmeta["features"]:
         if c not in X.columns:
@@ -390,7 +416,7 @@ def score(df: pd.DataFrame, sim: pd.DataFrame, model_dir: Path) -> pd.DataFrame:
 
 def score_function(df: pd.DataFrame, model_dir: Path) -> pd.DataFrame:
     meta = json.load(open(model_dir / "function_lgbm_v2.json"))
-    bst = lgb.Booster(model_file=str(model_dir / "function_lgbm_v2.txt"))
+    bst = _load_booster(model_dir / "function_lgbm_v2.txt")
     top = fv2.build_frame(df.drop(columns=["p0", "prob"], errors="ignore"),
                           df[["DeviceId", "Detector", "win", "cand_phase", "prob"]])
     if not len(top):
@@ -647,11 +673,15 @@ def main() -> None:
     ap.add_argument("--memory", default="4GB")
     ap.add_argument("--chunk-signals", type=int, default=None,
                     help="process this many signals at a time to bound memory")
+    ap.add_argument("--no-lightgbm", action="store_true",
+                    help="score with the pure-numpy tree evaluator (no lightgbm / scipy needed)")
     ap.add_argument("--min-actuations", type=int, default=MIN_ACTUATIONS,
                     help="below this many detector ON events in the sample, report "
                          "'not enough data' instead of an answer (default %(default)s; "
                          "use 1 to always answer)")
     a = ap.parse_args()
+    if a.no_lightgbm:
+        set_backend("numpy")
     ids = [s.strip() for s in a.device_ids.split(",")] if a.device_ids else None
     run(a.events, a.out, ids, a.start, a.end, a.odot_tiebreak, Path(a.models),
         a.threads, a.memory, a.chunk_signals, a.min_actuations)
