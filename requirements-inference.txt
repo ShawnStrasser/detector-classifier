@@ -1,0 +1,7 @@
+# Everything src/predict.py needs to turn raw hi-res events into detector predictions.
+# CPU only; no torch, no sklearn, no atspm.
+duckdb>=1.0
+pandas>=2.0
+numpy>=1.24
+pyarrow>=14.0
+lightgbm>=4.0

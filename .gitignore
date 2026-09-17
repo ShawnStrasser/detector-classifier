@@ -1,0 +1,26 @@
+# data, weights, and results are not versioned
+data/
+archive/
+.tmp/
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.pth
+*.pbix
+*.csv
+__pycache__/
+.ipynb_checkpoints/
+.venv/
+
+# --- but the shippable beta package IS versioned ---
+!models/
+!models/**
+!tests/
+!tests/data/
+!tests/data/**
+!docs/img/
+!docs/img/**
+
+# not redistributed / old notebook with saved outputs
+docs/*.pdf
+baseline/*.ipynb

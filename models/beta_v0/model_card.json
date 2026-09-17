@@ -1,0 +1,576 @@
+{
+ "name": "detector-classifier",
+ "version": "beta_v0",
+ "date": "2026-09-17",
+ "status": "BETA - for integration testing; the final study scoring is still pending",
+ "task": "From raw hi-res traffic-signal controller events, predict for every vehicle detector channel (1) the signal phase it is assigned to and (2) its function (Advance / Presence / Count / Other).",
+ "pipeline": [
+  "LightGBM phase-anonymous (detector, candidate phase) pair ranker",
+  "LightGBM joint per-signal decoder (actuation-similarity + channel-adjacency neighbours, signal-level claims)",
+  "optional ODOT standard-wiring tie-breaker (post-processing, default OFF)",
+  "LightGBM function model (sibling-relative features, temperature scaled)",
+  "label-free detector health flags -> status / review columns"
+ ],
+ "entry_point": "src/predict.py :: predict(events, start, end, odot_tiebreak)",
+ "runtime": {
+  "cpu_only": true,
+  "python": ">=3.10",
+  "requirements": "requirements-inference.txt",
+  "total_model_bytes": 3909745,
+  "total_model_mb": 3.73
+ },
+ "training_data": {
+  "source": "ODOT hi-res controller logs (Indiana enumerations), 2024-12-02..04",
+  "signals": 367,
+  "split": "DEV = 375 signals with labels; the 43 TEST signals were not trained on",
+  "labels": "detector-configs.csv: DeviceId, Detector, Phase, Function (5,171 labelled DEV detectors)",
+  "training_windows": [
+   "full72",
+   "h1_a",
+   "h1_b",
+   "h1_c",
+   "h24_a",
+   "h24_b",
+   "h3_a",
+   "h3_b",
+   "h6_a",
+   "h6_b",
+   "m10_a",
+   "m10_b",
+   "m10_c",
+   "m10_d",
+   "m30_a",
+   "m30_b",
+   "m30_c",
+   "m30_d",
+   "m5_a",
+   "m5_b",
+   "m5_c",
+   "m5_d"
+  ],
+  "window_mix_note": "models are trained on a MIX of window lengths (5 min .. 72 h) so one model serves every sample duration",
+  "allowed_event_codes": [
+   1,
+   7,
+   8,
+   9,
+   10,
+   11,
+   43,
+   44,
+   81,
+   82,
+   83,
+   84,
+   85,
+   86,
+   87,
+   88,
+   131,
+   150,
+   173
+  ],
+  "excluded_by_protocol": "gap-out/max-out/force-off (4,5,6,13), overlaps (61-66), FYA (32/33), pedestrian events, preemption"
+ },
+ "components": {
+  "phase_ranker": {
+   "file": "phase_lgbm_v2.txt",
+   "n_features": 261,
+   "n_estimators": 243,
+   "objective": "lambdarank",
+   "feature_list_sha256": "0bba5b930796e512c72a9658cb9d1fa3591f2a0d33c3676aa597eccaf0f1ba74"
+  },
+  "joint_decoder": {
+   "file": "decode_lgbm_v2.txt",
+   "n_features": 25,
+   "n_estimators": 155,
+   "objective": "binary",
+   "mode": "binary",
+   "feature_list_sha256": "d3489b67fa1f481b3cf52532764e7b53dac3d47835c61203d60bd05a18cb0c92"
+  },
+  "function_model": {
+   "file": "function_lgbm_v2.txt",
+   "n_features": 314,
+   "n_estimators": 149,
+   "classes": [
+    "Advance",
+    "Presence",
+    "Count"
+   ],
+   "feature_list_sha256": "a932ffb247f721c4ffd14d891e4e9ad3c5f0d92acb9837a91300ea2a3afa9591"
+  }
+ },
+ "thresholds": {
+  "function_other_threshold": 0.6,
+  "function_temperature": 1.1,
+  "odot_tiebreak_default": false,
+  "odot_tiebreak_margin": 0.5,
+  "odot_tiebreak_standardness_min": 0.7,
+  "odot_tiebreak_safer_setting": {
+   "margin": 0.25,
+   "standardness_min": 0.85
+  },
+  "low_evidence_actuations": 10,
+  "low_evidence_minutes": 10,
+  "low_confidence_phase_prob": 0.5
+ },
+ "metrics": {
+  "definition": "headline accuracy EXCLUDES unscorable detectors: zero actuations in the window, or the labelled phase never turns green in the window. The old 'all labelled detectors' figure is given too.",
+  "dev_6fold_oof_72h": {
+   "phase_ranker_only": {
+    "acc_scorable": 0.9749,
+    "acc_all_labeled": 0.9091,
+    "acc_fold0": 0.9711,
+    "fold_mean": 0.9744,
+    "fold_sd": 0.0055,
+    "acc_nonstd": 0.9153,
+    "n_scorable": 4822,
+    "n_unscorable_no_act": 298,
+    "n_unscorable_label_not_green": 51,
+    "coverage_0.9": 0.9144,
+    "acc_at_0.9": 0.9916
+   },
+   "phase_after_decoder": {
+    "acc_scorable": 0.9818,
+    "acc_all_labeled": 0.9155,
+    "acc_fold0": 0.9793,
+    "fold_mean": 0.9815,
+    "fold_sd": 0.0056,
+    "acc_nonstd": 0.9203,
+    "n_scorable": 4822,
+    "n_unscorable_no_act": 298,
+    "n_unscorable_label_not_green": 51,
+    "coverage_0.9": 0.96,
+    "acc_at_0.9": 0.9907
+   },
+   "phase_with_odot_tiebreak": {
+    "acc_scorable": 0.9826,
+    "acc_all_labeled": 0.9163,
+    "acc_fold0": 0.9793,
+    "fold_mean": 0.9823,
+    "fold_sd": 0.0046,
+    "acc_nonstd": 0.9169,
+    "n_scorable": 4822,
+    "n_unscorable_no_act": 298,
+    "n_unscorable_label_not_green": 51,
+    "coverage_0.9": 0.96,
+    "acc_at_0.9": 0.9907
+   },
+   "function": {
+    "acc_scorable": 0.897,
+    "acc_all_labeled": 0.8453,
+    "acc_fold0": 0.9305,
+    "fold_mean": 0.8994,
+    "fold_sd": 0.0209,
+    "n_scorable": 4873,
+    "n_unscorable_no_act": 298
+   }
+  },
+  "dev_6fold_oof_30min": {
+   "phase_after_decoder": {
+    "acc_scorable": 0.9624,
+    "acc_all_labeled": 0.8318,
+    "acc_fold0": 0.9703,
+    "fold_mean": 0.9629,
+    "fold_sd": 0.0051,
+    "acc_nonstd": 0.8778,
+    "n_scorable": 4469,
+    "n_unscorable_no_act": 657,
+    "n_unscorable_label_not_green": 44,
+    "coverage_0.9": 0.9001,
+    "acc_at_0.9": 0.9891
+   },
+   "phase_with_odot_tiebreak": {
+    "acc_scorable": 0.9661,
+    "acc_all_labeled": 0.835,
+    "acc_fold0": 0.9747,
+    "fold_mean": 0.9668,
+    "fold_sd": 0.0054,
+    "acc_nonstd": 0.8755,
+    "n_scorable": 4469,
+    "n_unscorable_no_act": 657,
+    "n_unscorable_label_not_green": 44,
+    "coverage_0.9": 0.9001,
+    "acc_at_0.9": 0.9891
+   },
+   "function": {
+    "acc_scorable": 0.8799,
+    "acc_all_labeled": 0.7681,
+    "acc_fold0": 0.9281,
+    "fold_mean": 0.8835,
+    "fold_sd": 0.0254,
+    "n_scorable": 4513,
+    "n_unscorable_no_act": 657
+   }
+  },
+  "coverage_curve_72h_decoded": [
+   {
+    "threshold": 0.0,
+    "coverage": 1.0,
+    "acc_covered": 0.981750311074243,
+    "n_covered": 4822
+   },
+   {
+    "threshold": 0.5,
+    "coverage": 0.9977187888842803,
+    "acc_covered": 0.9829557264601954,
+    "n_covered": 4811
+   },
+   {
+    "threshold": 0.6,
+    "coverage": 0.9912899211945251,
+    "acc_covered": 0.9855648535564854,
+    "n_covered": 4780
+   },
+   {
+    "threshold": 0.7,
+    "coverage": 0.9871422646204894,
+    "acc_covered": 0.9871848739495799,
+    "n_covered": 4760
+   },
+   {
+    "threshold": 0.8,
+    "coverage": 0.9788469514724181,
+    "acc_covered": 0.988135593220339,
+    "n_covered": 4720
+   },
+   {
+    "threshold": 0.9,
+    "coverage": 0.9599751140605558,
+    "acc_covered": 0.9907107366601858,
+    "n_covered": 4629
+   },
+   {
+    "threshold": 0.95,
+    "coverage": 0.9400663625051846,
+    "acc_covered": 0.9916170306640194,
+    "n_covered": 4533
+   },
+   {
+    "threshold": 0.99,
+    "coverage": 0.7113231024471174,
+    "acc_covered": 0.9944606413994169,
+    "n_covered": 3430
+   }
+  ],
+  "fold0_holdout_accuracy_vs_minutes": [
+   {
+    "minutes": 1.0,
+    "acc_off": 0.842,
+    "acc_on": 0.8641,
+    "acc_fn": 0.7584,
+    "scorable_share": 0.5475
+   },
+   {
+    "minutes": 2.0,
+    "acc_off": 0.8922,
+    "acc_on": 0.9088,
+    "acc_fn": 0.8217,
+    "scorable_share": 0.6589
+   },
+   {
+    "minutes": 5.0,
+    "acc_off": 0.9335,
+    "acc_on": 0.9455,
+    "acc_fn": 0.8543,
+    "scorable_share": 0.7537
+   },
+   {
+    "minutes": 10.0,
+    "acc_off": 0.9466,
+    "acc_on": 0.9589,
+    "acc_fn": 0.8788,
+    "scorable_share": 0.8057
+   },
+   {
+    "minutes": 15.0,
+    "acc_off": 0.9595,
+    "acc_on": 0.9655,
+    "acc_fn": 0.8905,
+    "scorable_share": 0.8245
+   },
+   {
+    "minutes": 30.0,
+    "acc_off": 0.963,
+    "acc_on": 0.9685,
+    "acc_fn": 0.8995,
+    "scorable_share": 0.8498
+   },
+   {
+    "minutes": 60.0,
+    "acc_off": 0.9667,
+    "acc_on": 0.9723,
+    "acc_fn": 0.9087,
+    "scorable_share": 0.8651
+   },
+   {
+    "minutes": 120.0,
+    "acc_off": 0.9739,
+    "acc_on": 0.9774,
+    "acc_fn": 0.91,
+    "scorable_share": 0.8871
+   },
+   {
+    "minutes": 180.0,
+    "acc_off": 0.9738,
+    "acc_on": 0.9785,
+    "acc_fn": 0.9199,
+    "scorable_share": 0.897
+   },
+   {
+    "minutes": 360.0,
+    "acc_off": 0.9755,
+    "acc_on": 0.9787,
+    "acc_fn": 0.9205,
+    "scorable_share": 0.9181
+   },
+   {
+    "minutes": 720.0,
+    "acc_off": 0.9761,
+    "acc_on": 0.9782,
+    "acc_fn": 0.9236,
+    "scorable_share": 0.9322
+   },
+   {
+    "minutes": 1440.0,
+    "acc_off": 0.9782,
+    "acc_on": 0.981,
+    "acc_fn": 0.9225,
+    "scorable_share": 0.9373
+   },
+   {
+    "minutes": 2880.0,
+    "acc_off": 0.9801,
+    "acc_on": 0.9811,
+    "acc_fn": 0.922,
+    "scorable_share": 0.9436
+   },
+   {
+    "minutes": 4320.0,
+    "acc_off": 0.9814,
+    "acc_on": 0.9814,
+    "acc_fn": 0.9243,
+    "scorable_share": 0.9584
+   }
+  ],
+  "in_sample_same_definition": {
+   "ranker_72h": {
+    "tag": "ranker_72h",
+    "n_scorable": 4822,
+    "acc_scorable": 0.995230194939859,
+    "acc_all_labeled": 0.9280603364919745,
+    "acc_nonstd": 0.9813559322033898,
+    "n_nonstd": 590,
+    "coverage_0.9": 0.9361260887598507,
+    "acc_at_0.9": 0.9977846699158175,
+    "n_unscorable_no_act": 298,
+    "n_unscorable_label_not_green": 51
+   },
+   "decoded_72h": {
+    "tag": "decoded_72h",
+    "n_scorable": 4822,
+    "acc_scorable": 0.9954375777685608,
+    "acc_all_labeled": 0.9282537226842004,
+    "acc_nonstd": 0.9745762711864406,
+    "n_nonstd": 590,
+    "coverage_0.9": 0.9778100373289091,
+    "acc_at_0.9": 0.9978791092258749,
+    "n_unscorable_no_act": 298,
+    "n_unscorable_label_not_green": 51
+   },
+   "tiebreak_72h": {
+    "tag": "tiebreak_72h",
+    "n_scorable": 4822,
+    "acc_scorable": 0.9954375777685608,
+    "acc_all_labeled": 0.9282537226842004,
+    "acc_nonstd": 0.9728813559322034,
+    "n_nonstd": 590,
+    "coverage_0.9": 0.9778100373289091,
+    "acc_at_0.9": 0.9978791092258749,
+    "n_unscorable_no_act": 298,
+    "n_unscorable_label_not_green": 51
+   },
+   "function_72h": {
+    "tag": "function_72h",
+    "n_scorable": 4873,
+    "acc_scorable": 0.9380258567617484,
+    "acc_all_labeled": 0.883968284664475,
+    "n_labels_outside_3class": 0,
+    "n_unscorable_no_act": 298
+   },
+   "ranker_30min": {
+    "tag": "ranker_30min",
+    "n_scorable": 4469,
+    "acc_scorable": 0.9805336465849975,
+    "acc_all_labeled": 0.847466640881841,
+    "acc_nonstd": 0.9526515151515151,
+    "n_nonstd": 528,
+    "coverage_0.9": 0.83436818258097,
+    "acc_at_0.9": 0.9960445159560204,
+    "n_unscorable_no_act": 657,
+    "n_unscorable_label_not_green": 44
+   },
+   "decoded_30min": {
+    "tag": "decoded_30min",
+    "n_scorable": 4469,
+    "acc_scorable": 0.9833864742406444,
+    "acc_all_labeled": 0.8499323148327209,
+    "acc_nonstd": 0.9417613636363636,
+    "n_nonstd": 528,
+    "coverage_0.9": 0.9281758684343011,
+    "acc_at_0.9": 0.9959018863376122,
+    "n_unscorable_no_act": 657,
+    "n_unscorable_label_not_green": 44
+   },
+   "tiebreak_30min": {
+    "tag": "tiebreak_30min",
+    "n_scorable": 4469,
+    "acc_scorable": 0.9848967947642222,
+    "acc_all_labeled": 0.8512376716302456,
+    "acc_nonstd": 0.9403409090909091,
+    "n_nonstd": 528,
+    "coverage_0.9": 0.9281758684343011,
+    "acc_at_0.9": 0.9959018863376122,
+    "n_unscorable_no_act": 657,
+    "n_unscorable_label_not_green": 44
+   },
+   "function_30min": {
+    "tag": "function_30min",
+    "n_scorable": 4513,
+    "acc_scorable": 0.9152589310440321,
+    "acc_all_labeled": 0.7989267066331464,
+    "n_labels_outside_3class": 0,
+    "n_unscorable_no_act": 657
+   },
+   "_note": "single frozen-model evaluation, 2026-09-17; models/beta_v0 unchanged afterwards; TEST remains reserved for the final study report"
+  },
+  "test_43_signals_single_frozen_evaluation": {
+   "ranker_72h": {
+    "tag": "ranker_72h",
+    "n_scorable": 548,
+    "acc_scorable": 0.9835766423357665,
+    "acc_all_labeled": 0.9135593220338983,
+    "acc_nonstd": 0.918918918918919,
+    "n_nonstd": 37,
+    "coverage_0.9": 0.9032846715328468,
+    "acc_at_0.9": 0.9939393939393939,
+    "n_unscorable_no_act": 33,
+    "n_unscorable_label_not_green": 9
+   },
+   "decoded_72h": {
+    "tag": "decoded_72h",
+    "n_scorable": 548,
+    "acc_scorable": 0.9872262773722628,
+    "acc_all_labeled": 0.9169491525423729,
+    "acc_nonstd": 0.918918918918919,
+    "n_nonstd": 37,
+    "coverage_0.9": 0.9616788321167883,
+    "acc_at_0.9": 0.9924098671726755,
+    "n_unscorable_no_act": 33,
+    "n_unscorable_label_not_green": 9
+   },
+   "tiebreak_72h": {
+    "tag": "tiebreak_72h",
+    "n_scorable": 548,
+    "acc_scorable": 0.9872262773722628,
+    "acc_all_labeled": 0.9169491525423729,
+    "acc_nonstd": 0.918918918918919,
+    "n_nonstd": 37,
+    "coverage_0.9": 0.9616788321167883,
+    "acc_at_0.9": 0.9924098671726755,
+    "n_unscorable_no_act": 33,
+    "n_unscorable_label_not_green": 9
+   },
+   "function_72h": {
+    "tag": "function_72h",
+    "n_scorable": 557,
+    "acc_scorable": 0.9012567324955116,
+    "acc_all_labeled": 0.8508474576271187,
+    "n_labels_outside_3class": 0,
+    "n_unscorable_no_act": 33
+   },
+   "ranker_30min": {
+    "tag": "ranker_30min",
+    "n_scorable": 506,
+    "acc_scorable": 0.948641975308642,
+    "acc_all_labeled": 0.8139830508474576,
+    "acc_nonstd": 0.8914728682170543,
+    "n_nonstd": 32,
+    "coverage_0.9": 0.802962962962963,
+    "acc_at_0.9": 0.992619926199262,
+    "n_unscorable_no_act": 75,
+    "n_unscorable_label_not_green": 8
+   },
+   "decoded_30min": {
+    "tag": "decoded_30min",
+    "n_scorable": 506,
+    "acc_scorable": 0.9683950617283951,
+    "acc_all_labeled": 0.8309322033898305,
+    "acc_nonstd": 0.8604651162790697,
+    "n_nonstd": 32,
+    "coverage_0.9": 0.894320987654321,
+    "acc_at_0.9": 0.992821645499724,
+    "n_unscorable_no_act": 75,
+    "n_unscorable_label_not_green": 8
+   },
+   "tiebreak_30min": {
+    "tag": "tiebreak_30min",
+    "n_scorable": 506,
+    "acc_scorable": 0.9758024691358025,
+    "acc_all_labeled": 0.8372881355932204,
+    "acc_nonstd": 0.8604651162790697,
+    "n_nonstd": 32,
+    "coverage_0.9": 0.894320987654321,
+    "acc_at_0.9": 0.992821645499724,
+    "n_unscorable_no_act": 75,
+    "n_unscorable_label_not_green": 8
+   },
+   "function_30min": {
+    "tag": "function_30min",
+    "n_scorable": 515,
+    "acc_scorable": 0.8878640776699029,
+    "acc_all_labeled": 0.775,
+    "n_labels_outside_3class": 0,
+    "n_unscorable_no_act": 75
+   },
+   "_note": "single frozen-model evaluation, 2026-09-17; models/beta_v0 unchanged afterwards; TEST remains reserved for the final study report"
+  }
+ },
+ "known_limitations": [
+  "label-noise ceiling: confident model/label disagreements suggest ~99% is the practical ceiling on these labels",
+  "non-standard-wired detectors score ~10 points lower than standard ones",
+  "function accuracy ~90%; the 'Other' threshold (0.6) is NOT yet validated (the DEV labels contain only Advance/Presence/Count)",
+  "trained only on ODOT signals and Indiana hi-res enumerations",
+  "detectors with no actuations in the window cannot be classified at all"
+ ],
+ "files": {
+  "decode_lgbm_v2.json": {
+   "bytes": 528,
+   "sha256": "666c9e1fb324086e6da428a8f47c3761babf0a5dcf6e51bedb2d3c77ab434e54"
+  },
+  "decode_lgbm_v2.txt": {
+   "bytes": 547833,
+   "sha256": "69fa57e6eab7e182ebc9bbac672637b3f067269e9b09802f9008e3b0d5e918fd"
+  },
+  "decode_v2.json": {
+   "bytes": 501,
+   "sha256": "70e82ecb4285bf0acafaea0d38f38e3aef7ca2d86e8f05ed0d54c0633dd414fe"
+  },
+  "function_lgbm_v2.json": {
+   "bytes": 7481,
+   "sha256": "c0cc10eb271ec6d2999e359626b9dd73599a255ccd70dafcd471044c8c6bb991"
+  },
+  "function_lgbm_v2.txt": {
+   "bytes": 1601105,
+   "sha256": "d519029cd5c54ed6e449920e5ce6541a0935980359dacb0abb4b4eb8baf9779d"
+  },
+  "phase_lgbm_v2.json": {
+   "bytes": 6289,
+   "sha256": "de4ffb0cd8993cc1119780fe1125d2968ef52fa66a5d500dafc1b18ff48987f0"
+  },
+  "phase_lgbm_v2.txt": {
+   "bytes": 1746008,
+   "sha256": "e9057ea9171b420a3a637fb86382ca91ed43dbf06e9c4510d6b6b728ebaead38"
+  }
+ }
+}

@@ -1,0 +1,33 @@
+{
+ "features": [
+  "p0",
+  "logit0",
+  "p0_gap",
+  "p0_rank",
+  "n_cand",
+  "sig_sum_o",
+  "sig_claims_o",
+  "sig_max_o",
+  "sig_ndet",
+  "cand_green_share",
+  "call43_per_cycle",
+  "calls_unclaimed",
+  "green_share_per_claim",
+  "det_n_on",
+  "log_win_hours",
+  "sim_mean",
+  "sim_max",
+  "sim_top1",
+  "sim_wsum",
+  "sim_n",
+  "adj_mean",
+  "adj_max",
+  "adj_top1",
+  "adj_wsum",
+  "adj_n"
+ ],
+ "champion": "decode_sim_adj_binary",
+ "mode": "binary",
+ "temperature": 1.0,
+ "n_estimators": 155
+}
