@@ -23,12 +23,24 @@ the function model.  No channel->phase table is used unless `odot_tiebreak=True`
 
 Models are loaded from the repo folder `models/beta_v0/` by default.
 
+Minimum evidence
+----------------
+A detector with fewer than `min_actuations` ON events in the sample does NOT get an answer:
+`phase_pred` / `function_pred` are blank and `status` says "not enough data: N actuations in
+sample (need >= MIN)".  The model's raw opinion is still returned in `phase_guess` /
+`function_guess` so nothing is lost.  The default (5) is the smallest minimum whose answered
+detectors stay within 1 point of the high-volume accuracy plateau on the DEV out-of-sample
+data (96.9 % vs 97.9 %); detectors with 5-19 actuations are answered but carry an
+"ok - low evidence" status and `review_flag`.  Pass `min_actuations=1` to always answer, or
+a higher value (10-20) for a stricter service.
+
 Output columns
 --------------
 DeviceId, Detector, phase_pred, phase_prob, phase_2nd, phase_2nd_prob,
 function_pred, function_prob, status, review_flag, n_actuations, minutes_of_data,
-tiebreak_applied, and the extras phase_margin, p_advance, p_presence, p_count,
-n_candidate_phases, health_flag, review_reason.
+tiebreak_applied, and the extras phase_guess, phase_guess_prob, function_guess,
+function_guess_prob, phase_margin, p_advance, p_presence, p_count, n_candidate_phases,
+health_flag, review_reason.
 """
 from __future__ import annotations
 
@@ -71,11 +83,14 @@ NEEDED = ["DeviceId", "Timestamp", "EventId", "Parameter"]
 OUT_COLS = ["DeviceId", "Detector", "phase_pred", "phase_prob", "phase_2nd",
             "phase_2nd_prob", "function_pred", "function_prob", "status", "review_flag",
             "n_actuations", "minutes_of_data", "tiebreak_applied"]
-EXTRA_COLS = ["phase_margin", "p_advance", "p_presence", "p_count",
+EXTRA_COLS = ["phase_guess", "phase_guess_prob", "function_guess", "function_guess_prob",
+              "phase_margin", "p_advance", "p_presence", "p_count",
               "n_candidate_phases", "health_flag", "review_reason"]
 
-# a channel with fewer actuations than this still gets a prediction but is flagged
-LOW_ACTUATIONS = 10
+# Below this many detector ON events in the sample we refuse to answer (see module docstring).
+MIN_ACTUATIONS = 5
+# answered, but thin enough to flag for review
+LOW_ACTUATIONS = 20
 LOW_MINUTES = 10.0
 LOW_CONF = 0.5
 
@@ -398,7 +413,8 @@ def _empty_result() -> pd.DataFrame:
     return pd.DataFrame(columns=OUT_COLS + EXTRA_COLS)
 
 
-def _assemble(univ, facts, hf, ph, fn, switched, model_note: str) -> pd.DataFrame:
+def _assemble(univ, facts, hf, ph, fn, switched, model_note: str,
+              min_actuations: int = MIN_ACTUATIONS) -> pd.DataFrame:
     res = univ.merge(facts[["DeviceId", "minutes_of_data", "n_candidate_phases",
                             "n_green_end", "n_calls"]], on="DeviceId", how="left")
     if ph is not None and len(ph):
@@ -433,6 +449,12 @@ def _assemble(univ, facts, hf, ph, fn, switched, model_note: str) -> pd.DataFram
     res.loc[res.n_actuations.fillna(0) == 0, ["health_flag", "health_reason"]] = \
         ["failed", "no_events"]
 
+    # the model's raw opinion is always kept, even where we refuse to answer
+    res["phase_guess"] = res.phase_pred
+    res["phase_guess_prob"] = res.phase_prob
+    res["function_guess"] = res.function_pred
+    res["function_guess_prob"] = res.function_prob
+
     # ---- status ------------------------------------------------------------
     status, review, reason = [], [], []
     for r in res.itertuples():
@@ -440,7 +462,7 @@ def _assemble(univ, facts, hf, ph, fn, switched, model_note: str) -> pd.DataFram
         if (r.n_actuations or 0) == 0:
             st = "cannot classify: no actuations"
             rv, rs = True, "no actuations"
-        elif r.health_flag == "failed":
+        elif r.health_flag == "failed" and r.health_reason != "near_zero_volume":
             st = status_for_user("failed", r.health_reason)
             rv, rs = True, r.health_reason
         elif not (r.n_candidate_phases or 0):
@@ -449,11 +471,17 @@ def _assemble(univ, facts, hf, ph, fn, switched, model_note: str) -> pd.DataFram
         elif pd.isna(r.phase_pred):
             st = "cannot classify: no usable detector/phase evidence in this window"
             rv, rs = True, "no prediction"
+        elif (r.n_actuations or 0) < min_actuations:
+            n = int(r.n_actuations)
+            st = (f"not enough data: {n} actuation" + ("" if n == 1 else "s") +
+                  f" in sample (need >= {min_actuations})")
+            rv, rs = True, "not enough data"
         else:
             rs = ""
             if (r.n_actuations or 0) < LOW_ACTUATIONS:
                 n = int(r.n_actuations)
-                notes.append(f"low evidence: only {n} actuation" + ("" if n == 1 else "s"))
+                notes.append(f"ok - low evidence ({n} actuation" +
+                             ("" if n == 1 else "s") + ")")
                 rs = "few actuations"
             if (r.minutes_of_data or 0) < LOW_MINUTES:
                 notes.append(f"low evidence: only {r.minutes_of_data:.0f} min of data")
@@ -464,7 +492,7 @@ def _assemble(univ, facts, hf, ph, fn, switched, model_note: str) -> pd.DataFram
             if not (r.n_calls or 0):
                 notes.append("reduced accuracy: no phase call events (43/44)")
                 rs = rs or "no 43/44 events"
-            if r.health_flag == "suspect":
+            if r.health_flag in ("suspect", "failed"):
                 notes.append(f"low confidence: detector data quality ({r.health_reason})")
                 rs = rs or r.health_reason
             if (r.phase_prob or 0) < LOW_CONF:
@@ -478,8 +506,9 @@ def _assemble(univ, facts, hf, ph, fn, switched, model_note: str) -> pd.DataFram
     res["status"] = status
     res["review_flag"] = review
     res["review_reason"] = reason
-    # a "cannot classify" channel never carries a phase / function answer
-    dead = res.status.str.startswith("cannot classify")
+    # "cannot classify" / "not enough data" channels carry no answer -- only a guess
+    dead = (res.status.str.startswith("cannot classify") |
+            res.status.str.startswith("not enough data"))
     res.loc[dead, ["phase_pred", "phase_prob", "phase_2nd", "phase_2nd_prob",
                    "function_pred", "function_prob", "p_advance", "p_presence",
                    "p_count", "phase_margin"]] = np.nan
@@ -491,7 +520,7 @@ def _assemble(univ, facts, hf, ph, fn, switched, model_note: str) -> pd.DataFram
     res["tiebreak_applied"] = (res.DeviceId.astype(str) + "|" +
                                res.Detector.astype(str)).isin(swk)
     res.loc[res.phase_pred.isna(), "tiebreak_applied"] = False
-    for c in ("phase_pred", "phase_2nd"):
+    for c in ("phase_pred", "phase_2nd", "phase_guess"):
         res[c] = res[c].astype("Int64")
     res["n_actuations"] = res.n_actuations.fillna(0).astype("Int64")
     res["minutes_of_data"] = res.minutes_of_data.astype(float).round(2)
@@ -502,16 +531,19 @@ def _assemble(univ, facts, hf, ph, fn, switched, model_note: str) -> pd.DataFram
 # ---------------------------------------------------------------- entry points
 def predict(events, start=None, end=None, odot_tiebreak: bool = False,
             device_ids=None, model_dir=None, threads: int = 4, memory: str = "4GB",
-            chunk_signals: int | None = None, verbose: bool = False) -> pd.DataFrame:
+            chunk_signals: int | None = None, verbose: bool = False,
+            min_actuations: int = MIN_ACTUATIONS) -> pd.DataFrame:
     """Raw hi-res events -> one row per detector channel.  Never raises on thin data.
 
     Parameters
     ----------
-    events        pandas DataFrame, or a path / glob to parquet or csv, with columns
-                  DeviceId, Timestamp, EventId, Parameter (lowercase variants accepted).
-    start, end    optional timestamp strings; `end` is exclusive.
-    odot_tiebreak turn on the ODOT standard-wiring tie-breaker (post-processing only).
-    chunk_signals process the signals in groups of this many to bound peak memory.
+    events         pandas DataFrame, or a path / glob to parquet or csv, with columns
+                   DeviceId, Timestamp, EventId, Parameter (lowercase variants accepted).
+    start, end     optional timestamp strings; `end` is exclusive.
+    odot_tiebreak  turn on the ODOT standard-wiring tie-breaker (post-processing only).
+    chunk_signals  process the signals in groups of this many to bound peak memory.
+    min_actuations below this many detector ON events no answer is given (the model's raw
+                   opinion is still returned in phase_guess / function_guess).
     """
     global _VERBOSE
     _VERBOSE = verbose
@@ -523,7 +555,7 @@ def predict(events, start=None, end=None, odot_tiebreak: bool = False,
         ids = device_ids or list_signals(events, start, end, threads, memory)
         if len(ids) > chunk_signals:
             parts = [predict(events, start, end, odot_tiebreak, ids[i:i + chunk_signals],
-                             model_dir, threads, memory, None, verbose)
+                             model_dir, threads, memory, None, verbose, min_actuations)
                      for i in range(0, len(ids), chunk_signals)]
             parts = [p for p in parts if len(p)]
             return (pd.concat(parts, ignore_index=True) if parts else _empty_result())
@@ -560,7 +592,7 @@ def predict(events, start=None, end=None, odot_tiebreak: bool = False,
             except Exception as exc:                              # pragma: no cover
                 note = (note + "; " if note else "") + \
                     f"function model unavailable ({type(exc).__name__})"
-        return _assemble(univ, facts, hf, ph, fn, switched, note)
+        return _assemble(univ, facts, hf, ph, fn, switched, note, min_actuations)
     finally:
         con.close()
 
@@ -585,11 +617,12 @@ def list_signals(events, start=None, end=None, threads: int = 2,
 
 def run(events: str, out: str, device_ids=None, start=None, end=None,
         odot_tiebreak: bool = False, model_dir=None, threads: int = 4,
-        memory: str = "4GB", chunk_signals: int | None = None) -> pd.DataFrame:
+        memory: str = "4GB", chunk_signals: int | None = None,
+        min_actuations: int = MIN_ACTUATIONS) -> pd.DataFrame:
     """CLI helper: predict and write a CSV."""
     t0 = time.time()
     res = predict(events, start, end, odot_tiebreak, device_ids, model_dir, threads,
-                  memory, chunk_signals, verbose=True)
+                  memory, chunk_signals, True, min_actuations)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     res.to_csv(out, index=False)
     print(f"wrote {out}: {len(res)} detectors, "
@@ -614,10 +647,14 @@ def main() -> None:
     ap.add_argument("--memory", default="4GB")
     ap.add_argument("--chunk-signals", type=int, default=None,
                     help="process this many signals at a time to bound memory")
+    ap.add_argument("--min-actuations", type=int, default=MIN_ACTUATIONS,
+                    help="below this many detector ON events in the sample, report "
+                         "'not enough data' instead of an answer (default %(default)s; "
+                         "use 1 to always answer)")
     a = ap.parse_args()
     ids = [s.strip() for s in a.device_ids.split(",")] if a.device_ids else None
     run(a.events, a.out, ids, a.start, a.end, a.odot_tiebreak, Path(a.models),
-        a.threads, a.memory, a.chunk_signals)
+        a.threads, a.memory, a.chunk_signals, a.min_actuations)
 
 
 if __name__ == "__main__":

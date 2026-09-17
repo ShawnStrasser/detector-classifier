@@ -17,7 +17,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from predict import OUT_COLS, predict  # noqa: E402
+from predict import MIN_ACTUATIONS, OUT_COLS, predict  # noqa: E402
 
 SAMPLE = Path(__file__).resolve().parent / "data" / "sample_events.parquet"
 
@@ -39,15 +39,42 @@ def test_predict_from_path():
     assert list(out.columns)[:len(OUT_COLS)] == OUT_COLS
     assert out.DeviceId.nunique() == 1
     assert out.Detector.is_unique
-    ok = out[out.status.eq("ok") | out.status.str.startswith("low")]
-    assert len(ok) > 0, "no classifiable detectors in the sample"
-    assert ok.phase_pred.notna().all()
-    assert ok.phase_prob.between(0, 1).all()
-    assert ok.function_pred.isin(["Advance", "Presence", "Count", "Other"]).all()
-    dead = out[out.status.str.startswith("cannot classify")]
-    assert dead.phase_pred.isna().all()
+    answered = out[out.phase_pred.notna()]
+    assert len(answered) > 0, "no detector got an answer in the sample"
+    assert (answered.n_actuations >= MIN_ACTUATIONS).all()
+    assert answered.phase_prob.between(0, 1).all()
+    assert answered.function_pred.isin(["Advance", "Presence", "Count", "Other"]).all()
+    assert not answered.status.str.startswith(("cannot classify", "not enough data")).any()
+    dead = out[out.status.str.startswith(("cannot classify", "not enough data"))]
+    assert dead.phase_pred.isna().all() and dead.function_pred.isna().all()
+    assert dead.review_flag.all()
     assert (out.minutes_of_data > 25).all() and (out.minutes_of_data < 35).all()
     assert not out.tiebreak_applied.any()   # default OFF
+
+
+def test_minimum_evidence_rule():
+    """Thin channels get no answer, but the raw opinion is kept in *_guess."""
+    out = predict(SAMPLE)
+    thin = out[out.status.str.startswith("not enough data")]
+    if len(thin):
+        assert (thin.n_actuations < MIN_ACTUATIONS).all()
+        assert (thin.n_actuations > 0).all()
+        assert thin.phase_guess.notna().all()       # nothing is lost
+        assert thin.phase_guess_prob.between(0, 1).all()
+        assert thin.status.str.contains(f"need >= {MIN_ACTUATIONS}").all()
+    # a strict minimum must answer fewer detectors than a permissive one
+    lenient = predict(SAMPLE, min_actuations=1)
+    strict = predict(SAMPLE, min_actuations=100)
+    assert lenient.phase_pred.notna().sum() >= out.phase_pred.notna().sum()
+    assert strict.phase_pred.notna().sum() <= out.phase_pred.notna().sum()
+    assert strict.phase_guess.notna().sum() == lenient.phase_pred.notna().sum()
+
+
+def test_low_evidence_warning():
+    out = predict(SAMPLE)
+    low = out[out.status.str.startswith("ok - low evidence")]
+    assert low.phase_pred.notna().all()
+    assert low.review_flag.all()
 
 
 def test_predict_from_dataframe_lowercase():
@@ -98,6 +125,14 @@ def test_no_calls_43_44():
     ev = ev[~ev.EventId.isin([43, 44])]
     out = predict(ev)
     assert out.phase_pred.notna().any()
+
+
+def test_one_minute_window_answers_little_but_keeps_guesses():
+    ev = _events()
+    t0 = ev.Timestamp.min()
+    out = predict(ev, start=str(t0), end=str(t0 + pd.Timedelta(minutes=1)))
+    assert len(out) > 0
+    assert out.phase_pred.notna().sum() <= out.phase_guess.notna().sum()
 
 
 def test_empty_selection():
