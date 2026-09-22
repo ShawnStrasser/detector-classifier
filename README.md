@@ -69,8 +69,11 @@ phase_2nd_prob, function_pred, function_prob, status, review_flag, n_actuations,
 plus `phase_guess, phase_guess_prob, function_guess, function_guess_prob, phase_margin, p_advance,
 p_presence, p_count, p_yellow_red, p_other, n_candidate_phases, health_flag, review_reason`.
 
-**Thresholds.** Auto-accept `phase_prob >= 0.9` and send the rest to review; `function_prob >= 0.8`
-is the comparable line, and `review_flag` is true whenever `status` is not exactly `ok`. Two dials
+**Thresholds** (two separate probabilities, one per output; measured on the 143 locked signals).
+**Phase:** accept `phase_prob >= 0.9` — keeps 90 % of answers at 97.9 % from 30 minutes, 95 % at 98.9 %
+from days of data; review the rest. **Function** is a first guess, not a verdict: `function_prob >= 0.7`
+keeps about two thirds of answers at 80–84 %, `>= 0.8` about half at 84–88 %; everything below is
+"suggested, verify". `review_flag` is true whenever `status` is not exactly `ok`. Two dials
 control when the model refuses to answer at all: `--min-actuations 5` (the default) refuses a
 detector with fewer than five ON events, `--min-prob` (off by default) refuses on confidence
 instead. On short samples `--min-actuations 1 --min-prob 0.9` answers *more* detectors at 2.5 points
