@@ -13,7 +13,7 @@ import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
-MODELS = os.path.join(ROOT, "models", "final_v1")
+MODELS = os.path.join(ROOT, "models", "final_v2")
 SAMPLE = os.path.join(ROOT, "tests", "data", "sample_events.parquet")
 
 RANKER_SEEDS = sorted(glob.glob(os.path.join(MODELS, "phase_lgbm_v4_s*.txt")))

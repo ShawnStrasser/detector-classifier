@@ -9,6 +9,14 @@ point is a full end-to-end `src/predict.py` run on raw controller events.
     python src/official/curve_final.py --stage run       # the 26 x 10 predictions
     python src/official/curve_final.py --stage json      # docs/img/final_accuracy_vs_minutes.json
 
+For `models/final_v2` only the sample lengths at or below the blend cut-off have to be
+re-run: above it the neural half is not used at all and the pipeline is the same code, so
+the final_v1 predictions are reused.  `--gpu` runs the network's forward pass with torch
+on the GPU (research only, verified equal to the shipped onnxruntime session).
+
+    python src/official/curve_final.py --stage run  --v2 [--gpu]
+    python src/official/curve_final.py --stage json --v2
+
 Then `python src/plot_final_accuracy.py` draws the png.
 """
 from __future__ import annotations
@@ -31,6 +39,8 @@ from common import DC_WORK, REPO  # noqa: E402
 import score_final as SF  # noqa: E402
 
 WORK = DC_WORK / "preds" / "final_test_DO_NOT_USE" / "curve"
+WORK_V2 = WORK / "v2"
+MODEL_V2 = REPO / "models" / "final_v2"
 EVENTS = WORK / "_events_newtest_sorted.parquet"
 T0, T1 = pd.Timestamp("2026-09-18 16:15:00"), pd.Timestamp("2026-09-21 10:23:00")
 SPAN_MIN = (T1 - T0).total_seconds() / 60.0            # ~ 3968 min = 66.1 h
@@ -80,10 +90,22 @@ def stage_events(a) -> None:
 def stage_run(a) -> None:
     sys.path.insert(0, str(REPO / "src"))
     import predict as P
-    WORK.mkdir(parents=True, exist_ok=True)
-    todo = [(d, i) for d in DURATIONS for i in range(len(ANCHORS))]
+    out_dir, model_dir, durs = WORK, None, DURATIONS
+    if a.v2:
+        import json as _json
+        cut = float(_json.load(open(MODEL_V2 / "blend.json"))["cutoff_minutes"])
+        out_dir, model_dir = WORK_V2, MODEL_V2
+        durs = [d for d in DURATIONS if d <= cut]
+        log(f"final_v2: {len(durs)} sample lengths at or below the {cut:.0f} min cut-off; "
+            "the longer ones reuse the final_v1 runs (same code path)")
+        if a.gpu:
+            from neural.gru_speedup import enable, verify
+            v = verify()
+            log(f"GRU forward pass on {enable()}; vs the shipped onnx runtime {v}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    todo = [(d, i) for d in durs for i in range(len(ANCHORS))]
     for d, i in todo:
-        dest = WORK / f"m{d}_a{i}.parquet"
+        dest = out_dir / f"m{d}_a{i}.parquet"
         if dest.exists():
             continue
         start = pd.Timestamp(ANCHORS[i])
@@ -92,6 +114,8 @@ def stage_run(a) -> None:
         end = start + pd.Timedelta(minutes=d)
         t0 = time.time()
         kw = dict(threads=8, memory="8GB", chunk_signals=12, min_actuations=1)
+        if model_dir is not None:
+            kw["model_dir"] = model_dir
         if "odot_tiebreak" in inspect.signature(P.predict).parameters:
             kw["odot_tiebreak"] = True     # as the original run; since removed from predict.py
         out = P.predict(EVENTS.as_posix(), start=str(start), end=str(end), **kw)
@@ -124,10 +148,11 @@ def stage_json(a) -> None:
     greens = _greens()
     log(f"{n_lab:,} labelled live channels; {len(greens):,} begin-green events")
     raw = []
+    cut = float(json.load(open(MODEL_V2 / "blend.json"))["cutoff_minutes"]) if a.v2 else 0
     for d in DURATIONS:
         rows = []
         for i in range(len(ANCHORS)):
-            f = WORK / f"m{d}_a{i}.parquet"
+            f = (WORK_V2 if (a.v2 and d <= cut) else WORK) / f"m{d}_a{i}.parquet"
             if not f.exists():
                 continue
             pr = pd.read_parquet(f)
@@ -173,7 +198,11 @@ def stage_json(a) -> None:
     out = {
         "chart": "accuracy and answer rate vs how much data is in the sample",
         "generated": time.strftime("%Y-%m-%d"),
-        "model": "models/final_v1 (src/predict.py, end to end from raw events)",
+        "model": ("models/final_v2 (src/predict.py, end to end from raw events); sample "
+                  "lengths above the blend cut-off reuse the final_v1 runs because the "
+                  "neural half is not used there and the code path is identical")
+                 if a.v2 else
+                 "models/final_v1 (src/predict.py, end to end from raw events)",
         "evaluation": ("the 143 NEWTEST signals -- locked away from every training and "
                        "tuning run of the study and scored exactly once. Phase truth = the "
                        "official controller timing; function truth = the current config "
@@ -205,6 +234,9 @@ def stage_json(a) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", required=True, choices=["events", "run", "json"])
+    ap.add_argument("--v2", action="store_true", help="models/final_v2")
+    ap.add_argument("--gpu", action="store_true",
+                    help="run the GRU forward pass on the GPU (research only)")
     a = ap.parse_args()
     globals()[f"stage_{a.stage}"](a)
 

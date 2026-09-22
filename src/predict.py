@@ -1,6 +1,7 @@
 """Detector phase + function inference: raw controller events in, one row per detector out.
 
-FINAL MODEL (`models/final_v1`, 2026-09-21).  See `docs/FINAL_REPORT.md`.
+FINAL MODEL (`models/final_v2`, 2026-09-22).  See `docs/FINAL_REPORT.md` and
+`results/13_gru_blend.md`.
 
 Command line
 ------------
@@ -26,11 +27,22 @@ coordination state, the pair features, the cross-detector similarity and actuati
 graphs, the 3-seed phase ranker, the joint decoder and the 5-class function model.
 No channel->phase table is used anywhere.
 
-Models are loaded from the repo folder `models/final_v1/` by default:
+Models are loaded from the repo folder `models/final_v2/` by default:
     phase_lgbm_v4_s{0,1,2}.txt   pair ranker, 3 seeds, averaged (stage 07)
+    gru.onnx                     the neural pair scorer (onnxruntime, `src/gru_onnx.py`)
     decode_lgbm_v4.txt           joint per-signal decoder
     function_lgbm_v4.txt         5-class function head
-This replaces the beta of 2026-09-17 (see the git history).
+    blend.json                   how the two phase models are mixed
+
+Two models, one answer (new in final_v2).  On samples up to `cutoff_minutes` of data the
+ranker's per-detector probabilities are averaged 50/50 with a small recurrent network
+that reads the raw second-by-second trace, and the joint decoder then runs on the
+mixture.  The two make genuinely different mistakes on short samples, so averaging them
+removes about a third of the phase errors at 30 minutes.  Above the cut-off the network
+is not run at all: it would cost far more than the fraction of a point it still adds.
+The network is evaluated with **onnxruntime on the CPU** -- one runtime, no PyTorch and
+no fallback -- and the function model is untouched: it reads the tree pipeline's phase,
+exactly as in final_v1, so function output is unchanged.
 
 Minimum evidence -- two ways to refuse
 --------------------------------------
@@ -75,11 +87,12 @@ import features as f1  # noqa: E402
 import features_v2 as f2  # noqa: E402
 import features_v3 as f3  # noqa: E402
 import function_v3 as fv3  # noqa: E402
+import gru_blend as gb  # noqa: E402
 from common import ALLOWED_EVENTS, MAX_DETECTOR_CHANNEL  # noqa: E402
 from health import flag_detectors, status_for_user  # noqa: E402
 
 # repo-relative model folder -- no absolute user paths anywhere in the inference path
-DEFAULT_MODEL_DIR = Path(__file__).resolve().parents[1] / "models" / "final_v1"
+DEFAULT_MODEL_DIR = Path(__file__).resolve().parents[1] / "models" / "final_v2"
 
 EV_LIST = ",".join(str(e) for e in ALLOWED_EVENTS)
 WIN = "infer"
@@ -452,11 +465,16 @@ def _normalise_by_detector(df: pd.DataFrame, s: np.ndarray) -> np.ndarray:
     return (d.s / d.groupby("g")["s"].transform("sum")).to_numpy()
 
 
-def score(df: pd.DataFrame, sim: pd.DataFrame, model_dir: Path) -> pd.DataFrame:
+def score(df: pd.DataFrame, sim: pd.DataFrame, model_dir: Path,
+          gru: pd.DataFrame | None = None, blend_cfg: dict | None = None) -> pd.DataFrame:
     """Stage 1: the seed-bagged pair ranker.  Stage 2: the joint per-signal decoder.
 
     The K ranker seeds are averaged **after** each one is turned into a per-detector
     probability -- exactly the averaging the training code measured (stage 07).
+
+    When `gru` is given (short samples only), the neural pair scores are mixed into the
+    first stage before the decoder runs, so the joint step can use them; `prob_lgbm`
+    keeps the trees-only answer, which is what the function model reads.
     """
     meta = json.load(open(model_dir / "phase_lgbm_v4.json"))
     files = _bag_files(model_dir, "phase_lgbm_v4", meta)
@@ -468,27 +486,45 @@ def score(df: pd.DataFrame, sim: pd.DataFrame, model_dir: Path) -> pd.DataFrame:
     ps = [_softmax_by_detector(df, np.asarray(_load_booster(f).predict(X))) for f in files]
     df["p0"] = np.mean(ps, axis=0)
     log(f"ranker: {len(files)} seed model(s) averaged")
+    df["p0_lgbm"] = df.p0
+    if gru is not None and len(gru):
+        df["p0"] = gb.mix(df, "p0", gru, float(blend_cfg["weight_lightgbm"]))
+        log(f"blended the neural pair scores into the first stage "
+            f"(weight {blend_cfg['weight_lightgbm']} trees)")
 
     dmeta = json.load(open(model_dir / "decode_lgbm_v4.json"))
     dbst = _load_booster(model_dir / "decode_lgbm_v4.txt")
-    Xd = dec.assemble(df[["DeviceId", "Detector", "win", "cand_phase", "p0"]],
-                      pairs=df, sim=sim)
-    for c in dmeta["features"]:
-        if c not in Xd.columns:
-            Xd[c] = np.nan
-    sd = np.asarray(dbst.predict(Xd[dmeta["features"]]))
-    Xd["prob"] = (_normalise_by_detector(Xd, sd) if dmeta.get("mode") == "binary"
-                  else _softmax_by_detector(Xd, sd, dmeta.get("temperature", 1.0)))
-    return df.merge(Xd[["DeviceId", "Detector", "win", "cand_phase", "prob"]],
-                    on=["DeviceId", "Detector", "win", "cand_phase"], how="left")
+    key = ["DeviceId", "Detector", "win", "cand_phase"]
+
+    def decode(src: str, name: str) -> pd.DataFrame:
+        Xd = dec.assemble(df[key + [src]].rename(columns={src: "p0"}), pairs=df, sim=sim)
+        for c in dmeta["features"]:
+            if c not in Xd.columns:
+                Xd[c] = np.nan
+        sd = np.asarray(dbst.predict(Xd[dmeta["features"]]))
+        Xd[name] = (_normalise_by_detector(Xd, sd) if dmeta.get("mode") == "binary"
+                    else _softmax_by_detector(Xd, sd, dmeta.get("temperature", 1.0)))
+        return Xd[key + [name]]
+
+    out = df.merge(decode("p0", "prob"), on=key, how="left")
+    if gru is not None and len(gru):
+        # the function model keeps reading the trees-only phase, so its output is
+        # bit-identical to final_v1
+        out = out.merge(decode("p0_lgbm", "prob_lgbm"), on=key, how="left")
+    else:
+        out["prob_lgbm"] = out["prob"]
+    return out
 
 
 def _function_frame(df: pd.DataFrame) -> pd.DataFrame:
     """The function design matrix: the pair features of the detector's **predicted** phase,
     plus shape, sibling-relative and cross-detector lag aggregates.  Identical code path to
     training (`src/function_v4.py --stage frame`); no label and no phase number is used."""
-    pairs = df.drop(columns=["p0", "prob"], errors="ignore")
-    probs = df[["DeviceId", "Detector", "win", "cand_phase", "prob"]]
+    drop = ["p0", "prob", "p0_lgbm", "prob_lgbm"]
+    pairs = df.drop(columns=drop, errors="ignore")
+    src = "prob_lgbm" if "prob_lgbm" in df.columns else "prob"
+    probs = df[["DeviceId", "Detector", "win", "cand_phase", src]].rename(
+        columns={src: "prob"})
     p = pairs.merge(probs, on=["DeviceId", "Detector", "win", "cand_phase"], how="inner")
     i = p.groupby(["DeviceId", "Detector", "win"], sort=False)["prob"].idxmax()
     top = p.loc[i].copy().rename(columns={"cand_phase": "pred_phase", "prob": "top_prob"})
@@ -710,6 +746,15 @@ def predict(events, start=None, end=None,
             return _empty_result()
         hf = health_frame(con, w1 - w0)
         note = ""
+        # ---- the neural half: only for samples shorter than the frozen cut-off ----
+        cfg, gru = gb.config(model_dir), None
+        # rounded to the nearest minute, so a request for exactly two hours is inside the
+        # cut-off even though the observed span is a fraction of a second longer
+        minutes = round((w1 - w0) / 60.0)
+        if cfg is not None and minutes <= float(cfg["cutoff_minutes"]):
+            gru = gb.phase_probs(con, cfg["weights_path"], int(round(w0 * 1000)),
+                                 int(round(w1 * 1000)))
+            log(f"neural pair scores for {gru.Detector.nunique()} detectors")
         try:
             df, sim = build_features(con, w0, w1)
         except Exception as exc:                                  # pragma: no cover
@@ -718,7 +763,7 @@ def predict(events, start=None, end=None,
         ph = fn = None
         if df is not None and len(df):
             log(f"features {df.shape}, similarity {sim.shape}")
-            df = score(df, sim, model_dir)
+            df = score(df, sim, model_dir, gru, cfg)
             ph = df[["DeviceId", "Detector", "cand_phase", "prob"]].copy()
             s = ph.groupby(["DeviceId", "Detector"])["prob"].transform("sum")
             ph["prob"] = ph.prob / s.replace(0, np.nan)

@@ -3,10 +3,10 @@
 Everything heavy lives under `%DC_WORK%` (default `~/dc_work`); this folder is code only.
 Run training with `C:\Users\hwyr67g\venvs\detector-classifier\Scripts\python.exe`.
 
-## Shipping the FINAL model (`models/final_v1/`) — see `docs/FINAL_REPORT.md`
+## Shipping the FINAL model (`models/final_v2/`) — see `results/13_gru_blend.md`
 
 `src/predict.py` is the only file an integrator needs. It loads the models from the
-repo-relative folder `models/final_v1/` (no absolute paths anywhere in the inference path),
+repo-relative folder `models/final_v2/` (no absolute paths anywhere in the inference path),
 needs only `requirements-inference.txt`, and works as a CLI **and** as a function:
 
 ```python
@@ -22,17 +22,31 @@ per-detector probabilities. **No wiring table is used anywhere**: the ODOT tie-b
 measured and then dropped, so `tiebreak.py` is research code only and `predict.py` does not
 import it.
 
+**New in final_v2 (stage 13).** On samples up to the frozen cut-off (`blend.json`,
+120 minutes) the ranker's per-detector probabilities are averaged 50/50 with a small
+GRU that reads the raw 1-second trace, and the joint decoder then runs on the mixture.
+The network runs with **onnxruntime on the CPU** — `src/gru_onnx.py` is the only runtime,
+there is no PyTorch path and no optional import. Above the cut-off it is not run at all.
+The function head still reads the trees-only phase, so function output is byte-identical
+to final_v1.
+
 | file | what it does |
 |---|---|
-| `predict.py` | **the shipped entry point** (`models/final_v1`) |
+| `predict.py` | **the shipped entry point** (`models/final_v2`) |
 | `lgbm_numpy.py` | `NumpyBooster` / `NumpyBoosterBag` — run the LightGBM text models with numpy only |
-| `official/fit_final_v1.py` | fits `models/final_v1` (`--stage oof \| models \| card`) |
-| `official/score_final.py` | the single final scoring of the locked test signals |
+| `gru_onnx.py` | the GRU pair scorer: one onnxruntime session, dynamic pair and time axes |
+| `gru_input.py` | raw events → interval streams → the 1 s, 9-channel raster (training definitions) |
+| `gru_blend.py` | `config()` / `phase_probs()` / `mix()` — the blend as `predict.py` uses it |
+| `neural/{ncache2,data2,train2,infer2,export_gru,bench_gru,gru_speedup}.py` | stage-13 refit: cache, dataset, training, held-out predictions, ONNX export, runtime benchmark, research-only GPU forward pass |
+| `official/fit_final_v1.py` | fits the LightGBM half (`--stage oof \| models \| card`) |
+| `official/ship_final_v2.py` | assembles `models/final_v2` and its model card |
+| `official/blend_v2.py` (+ `blend_v2_predecode.py`) | the stage-13 blend analysis (`--stage after \| before \| seeds`) |
+| `official/score_final.py` / `score_final_v2.py` | the two scorings of the locked test signals |
 | `official/curve_final.py` + `plot_final_accuracy.py` | the accuracy-vs-sample-length chart |
-| `official/blend_check.py` | LightGBM + GRU probability blend check |
+| `official/blend_check.py` | the stage-12 (old GRU) blend check |
 
 Tests: `tests/test_predict_smoke.py`, `tests/test_numpy_backend.py`,
-`tests/test_number_invariance.py` — run each in its own process.
+`tests/test_number_invariance.py`, `tests/test_gru_runtime.py` — run each in its own process.
 
 The beta's own entry point (`predict_beta_v0.py`, `models/beta_v0`) was used once for the
 before/after comparison in `results/12_final_model.md` and has since been removed; restore it
