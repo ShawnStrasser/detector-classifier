@@ -1,20 +1,44 @@
-# `src/` — stage 01 foundation (LightGBM)
+# `src/`
 
 Everything heavy lives under `%DC_WORK%` (default `~/dc_work`); this folder is code only.
 Run training with `C:\Users\hwyr67g\venvs\detector-classifier\Scripts\python.exe`.
 
-## Shipping the beta (`models/beta_v0/`) — see `docs/BETA_REPORT.md`
+## Shipping the FINAL model (`models/final_v1/`) — see `docs/FINAL_REPORT.md`
 
 `src/predict.py` is the only file an integrator needs. It loads the models from the
-repo-relative folder `models/beta_v0/` (no absolute paths anywhere in the inference path),
+repo-relative folder `models/final_v1/` (no absolute paths anywhere in the inference path),
 needs only `requirements-inference.txt`, and works as a CLI **and** as a function:
 
 ```python
 from predict import predict
-out = predict("events.parquet", start=None, end=None, odot_tiebreak=False)
+out = predict("events.parquet", start=None, end=None, min_actuations=5, min_prob=0.0)
 ```
 
-`tests/test_predict_smoke.py` runs it end-to-end on `tests/data/sample_events.parquet`.
+It carries the three patches that used to live in `src/predict_v1.py` (now removed): the
+four-colour cycle table that keeps event 11 apart, the `features_v3` yellow/red-clearance and
+detector-lag tables, and the 5-class function head built on the model's own predicted phase.
+The phase ranker is a **3-model seed bag** (`phase_lgbm_v4_s{0,1,2}.txt`), averaged as
+per-detector probabilities. **No wiring table is used anywhere**: the ODOT tie-breaker was
+measured and then dropped, so `tiebreak.py` is research code only and `predict.py` does not
+import it.
+
+| file | what it does |
+|---|---|
+| `predict.py` | **the shipped entry point** (`models/final_v1`) |
+| `lgbm_numpy.py` | `NumpyBooster` / `NumpyBoosterBag` — run the LightGBM text models with numpy only |
+| `official/fit_final_v1.py` | fits `models/final_v1` (`--stage oof \| models \| card`) |
+| `official/score_final.py` | the single final scoring of the locked test signals |
+| `official/curve_final.py` + `plot_final_accuracy.py` | the accuracy-vs-sample-length chart |
+| `official/blend_check.py` | LightGBM + GRU probability blend check |
+
+Tests: `tests/test_predict_smoke.py`, `tests/test_numpy_backend.py`,
+`tests/test_number_invariance.py` — run each in its own process.
+
+The beta's own entry point (`predict_beta_v0.py`, `models/beta_v0`) was used once for the
+before/after comparison in `results/12_final_model.md` and has since been removed; restore it
+from git history to re-run that arm of `official/score_final.py`.
+
+## Stage 01 foundation
 
 | file | what it does |
 |---|---|

@@ -6,6 +6,11 @@
 Supports gbdt models with numerical splits (decision types with missing = None / Zero / NaN) and the
 objectives used here: lambdarank / regression (raw score), binary (sigmoid), multiclass (softmax).
 Categorical splits and linear trees are not supported and raise at load time.
+
+A **seed-bagged** model (stage 07) is several text models whose predictions are averaged:
+
+    bag = NumpyBoosterBag(["m_s0.txt", "m_s1.txt", "m_s2.txt"])
+    y = bag.predict(df[features])          # == mean of the individual predictions
 """
 from __future__ import annotations
 
@@ -100,3 +105,37 @@ class NumpyBooster:
             elif name in ("multiclassova", "cross_entropy", "xentropy", "poisson", "gamma", "tweedie"):
                 raise NotImplementedError(f"objective {name} is not supported")
         return raw[:, 0] if self.k == 1 else raw
+
+
+class NumpyBoosterBag:
+    """Average of K LightGBM text models trained with different seeds (stage 07 bagging).
+
+    The average is taken in the models' own output space -- probabilities for binary /
+    multiclass objectives, raw scores for rankers -- which is exactly what the training
+    code does when it averages fold predictions."""
+
+    def __init__(self, model_files):
+        self.boosters = [f if isinstance(f, NumpyBooster) else NumpyBooster(f)
+                         for f in model_files]
+        if not self.boosters:
+            raise ValueError("NumpyBoosterBag needs at least one model file")
+        b0 = self.boosters[0]
+        self.feature_names = b0.feature_names
+        self.n_features = b0.n_features
+        self.k = b0.k
+        self.objective = b0.objective
+        for b in self.boosters[1:]:
+            if b.n_features != self.n_features or b.feature_names != self.feature_names:
+                raise ValueError("bagged models must share the same feature list")
+
+    def predict(self, X, raw_score: bool = False) -> np.ndarray:
+        out = None
+        for b in self.boosters:
+            p = b.predict(X, raw_score=raw_score)
+            out = p if out is None else out + p
+        return out / len(self.boosters)
+
+
+def predict_average(model_files, X, raw_score: bool = False) -> np.ndarray:
+    """One-shot helper: mean prediction of the given LightGBM text models."""
+    return NumpyBoosterBag(model_files).predict(X, raw_score=raw_score)

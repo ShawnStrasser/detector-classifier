@@ -149,6 +149,14 @@ def build(devices: list[str] | None = None, chunk: int = 30) -> None:
             co = gCO.get(dev)
             out["co_on"] = (co.a.values if co is not None else np.zeros(0)).astype(np.int32)
             out["co_off"] = (co.b.values if co is not None else np.zeros(0)).astype(np.int32)
+            # sanity: every stream must reach the end of the log, not just day 2.
+            # (a silent truncation of the 43/44 call stream at the end of Dec 3 cost
+            #  ~14 accuracy points on Dec-4 windows before it was caught)
+            if len(out["g_on"]) and len(out["c_on"]):
+                g_end, c_end = int(out["g_on"].max()), int(out["c_on"].max())
+                if g_end - c_end > 6 * 3600 * 1000:
+                    log(f"WARNING {dev}: call stream ends {(g_end-c_end)/3.6e6:.1f} h "
+                        f"before the green stream -- truncated input")
             np.savez(SIGDIR / f"{dev}.npz", **out)
         log(f"chunk {i//chunk}: {len(part)} signals in {time.time()-t0:.0f}s")
     con.close()

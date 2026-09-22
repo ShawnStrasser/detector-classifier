@@ -29,5 +29,21 @@
  "champion": "decode_sim_adj_binary",
  "mode": "binary",
  "temperature": 1.0,
- "n_estimators": 155
+ "best_iteration": 796,
+ "params": {
+  "objective": "binary",
+  "learning_rate": 0.05,
+  "num_leaves": 31,
+  "min_child_samples": 60,
+  "feature_fraction": 0.8,
+  "bagging_fraction": 0.8,
+  "bagging_freq": 1,
+  "lambda_l2": 1.0,
+  "n_jobs": 10,
+  "verbose": -1,
+  "bagging_seed": 0,
+  "feature_fraction_seed": 100,
+  "seed": 0,
+  "n_estimators": 800
+ }
 }

@@ -1,3 +1,5 @@
+> **Superseded by [FINAL_REPORT.md](FINAL_REPORT.md) (2026-09-21).** The beta model and the ODOT tie-breaker option described here were replaced; this page is kept as a record.
+
 # Detector classifier — BETA (`models/beta_v0`, 2026-09-17)
 
 **What it does.** Give it raw hi-res controller events; for every vehicle detector channel it returns

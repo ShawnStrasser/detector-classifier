@@ -117,19 +117,22 @@ def predict_windows(model, arch, table, devs, starts, device, workers=6, bs=4,
     return acc
 
 
-def to_frames(acc: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+def to_frames(acc: dict, with_nact: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
     rows, frows = [], []
     for (dev, det), (cand, sp, n, na, sf) in acc.items():
         p = sp / max(n, 1)
         p = p / max(p.sum(), 1e-12)
         for c, pv in zip(cand, p):
-            rows.append((dev, det, int(c), float(pv)))
+            rows.append((dev, det, int(c), float(pv), float(na)))
         f = sf / max(n, 1)
         f = f / max(f.sum(), 1e-12)
-        frows.append((dev, det, float(f[0]), float(f[1]), float(f[2])))
-    ph = pd.DataFrame(rows, columns=["DeviceId", "Detector", "cand_phase", "prob"])
+        frows.append((dev, det, float(f[0]), float(f[1]), float(f[2]), float(na)))
+    ph = pd.DataFrame(rows, columns=["DeviceId", "Detector", "cand_phase", "prob", "n_act"])
     fn = pd.DataFrame(frows, columns=["DeviceId", "Detector",
-                                      "p_advance", "p_presence", "p_count"])
+                                      "p_advance", "p_presence", "p_count", "n_act"])
+    if not with_nact:                      # strict contract format
+        ph = ph.drop(columns=["n_act"])
+        fn = fn.drop(columns=["n_act"])
     return ph, fn
 
 
@@ -165,6 +168,9 @@ def main():
     ap.add_argument("--agg-scan", action="store_true",
                     help="compare the three window-pooling rules on this fold")
     ap.add_argument("--curve", action="store_true", help="accuracy-vs-duration curve")
+    ap.add_argument("--anchors", default="",
+                    help="comma-separated window prefixes to restrict --curve to "
+                         "(e.g. m30,h1,h3,h6); default = all of features.WINDOWS_MIXED")
     ap.add_argument("--cpu-timing", action="store_true")
     ap.add_argument("--minutes-curve", action="store_true")
     args = ap.parse_args()
@@ -208,8 +214,11 @@ def main():
 
     # ---- accuracy vs duration -----------------------------------------------
     if args.curve:
-        rows, bw = [], []
-        for name, t, secs in ANCHORS:
+        rows, bw, bwf = [], [], []
+        keep = [s.strip() for s in args.anchors.split(",") if s.strip()]
+        anchors = [a for a in ANCHORS
+                   if not keep or a[0].split("_")[0] in keep or a[0] in keep]
+        for name, t, secs in anchors:
             st = sub_windows(t, secs)
             a = predict_windows(model, arch, table, devs, st, device, args.workers,
                                 args.bs, args.chunk, agg=args.agg)
@@ -217,12 +226,14 @@ def main():
             dur = DURATION_OF["full72" if name == "full72" else name.split("_")[0]]
             rows.append(dict(win=name, hours=dur, n_sub=len(st), acc_all=aa,
                              acc_cov=ac, n=n, n_cov=nc))
-            log(f"  {name:8s} {dur:5.1f}h  all {aa:.4f}  covered {ac:.4f} (n_cov={nc})")
-            p, _ = to_frames(a)
+            log(f"  {name:8s} {dur:5.1f}h  all {aa:.4f}  scorable {ac:.4f} (n={nc})")
+            p, fq = to_frames(a, with_nact=True)
             p["win"] = name
-            bw.append(p)
+            fq["win"] = name
+            bw.append(p); bwf.append(fq)
         pd.DataFrame(rows).to_csv(DC_WORK / "neural" / f"{tag}_curve.csv", index=False)
         pd.concat(bw).to_parquet(PREDS / f"{tag}_bywindow.parquet", index=False)
+        pd.concat(bwf).to_parquet(PREDS / f"{tag}_bywindowfn.parquet", index=False)
 
 
 MINUTES = [1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440, 2880, 4320]

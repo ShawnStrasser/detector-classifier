@@ -180,6 +180,26 @@ def func_predict(model, table, devs, starts_ms, dev, cycles, workers=4, bs=4, ch
     return {k: v[0] / max(v[1], 1) for k, v in acc.items()}
 
 
+def parse_kw(s: str) -> dict:
+    """"patch=8,d=128" -> {'patch': 8, 'd': 128}  (shell-quoting-proof)."""
+    out: dict = {}
+    for part in (s or "").replace(";", ",").split(","):
+        part = part.strip().strip('"').strip("'")
+        if not part:
+            continue
+        k, _, v = part.partition("=")
+        k = k.strip()
+        v = v.strip()
+        try:
+            out[k] = int(v)
+        except ValueError:
+            try:
+                out[k] = float(v)
+            except ValueError:
+                out[k] = v
+    return out
+
+
 # ------------------------------------------------------------------ train loop
 def run(args):
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -201,8 +221,18 @@ def run(args):
     es_devs = [d for d in es_devs if d in es_tab]
     log(f"arch={args.arch} train={len(tr_devs)} sig / es={len(es_devs)} sig")
 
-    kw = json.loads(args.model_kw) if args.model_kw else {}
+    kw = parse_kw(args.model_kw)
+    prev = None
+    if args.init_from:
+        p = Path(args.init_from)
+        if not p.exists():
+            p = MODELDIR / f"{args.init_from}.pt"
+        prev = torch.load(p, map_location="cpu")
+        kw = prev.get("kw", kw)
     model = PairNet(args.arch, **kw).to(dev)
+    if prev is not None:
+        model.load_state_dict(prev["state"])
+        log(f"continuing from {args.init_from} (es {prev.get('es_score')})")
     npar = n_params(model)
     log(f"params: {npar:,}  kw={kw}")
 
@@ -242,6 +272,9 @@ def run(args):
             gstep += 1
             tot += [float(loss), float(lp), float(lf)]; nb += 1
         t_train += time.time() - t0
+        if args.eval_every > 1 and (ep % args.eval_every) and ep != args.epochs - 1:
+            log(f"ep {ep}: loss {tot[0]/nb:.4f} (no eval) {time.time()-t0:.0f}s")
+            continue
         pr = predict(model, es_tab, es_devs, ES_STARTS, dev, cycles,
                      workers=args.workers, bs=args.bs, chunk=args.chunk)
         a_pool, n, a_single = top1_acc(pr, es_tab)
@@ -294,8 +327,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--arch", default="tcn",
                     choices=["tcn", "gru", "transformer", "cyc2d", "convgru"])
-    ap.add_argument("--model-kw", default="", help="JSON dict of backbone kwargs")
+    ap.add_argument("--model-kw", default="", help="backbone kwargs, e.g. patch=8,d=128")
+    ap.add_argument("--init-from", default="", help="checkpoint tag to continue from")
     ap.add_argument("--patience", type=int, default=10)
+    ap.add_argument("--eval-every", type=int, default=1)
     ap.add_argument("--lr-patience", type=int, default=3)
     ap.add_argument("--warmup-epochs", type=float, default=0.0)
     ap.add_argument("--wd", type=float, default=1e-4)

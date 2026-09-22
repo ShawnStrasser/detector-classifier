@@ -21,6 +21,15 @@ __pycache__/
 !docs/img/
 !docs/img/**
 
+# --- the manual-review package for the user (GUIDs, channel numbers, labels, model outputs only) ---
+
 # not redistributed / old notebook with saved outputs
 docs/*.pdf
 baseline/*.ipynb
+
+# ODOT-specific staging download code: never committed
+src/download/
+
+# research candidates (only models/final_v1 ships) and ODOT staff review files (not published)
+models/*candidate*/
+review/

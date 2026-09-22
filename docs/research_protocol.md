@@ -82,6 +82,16 @@ Headline accuracy EXCLUDES detectors that are impossible given the sample: (a) z
 and put (b) on the manual-review list (possible mislabels). Still report the old "all labeled" figure as a footnote.
 Neural training: no model is discarded for lack of training time — train to a documented plateau.
 
+## Label sources (user decision 2026-09-21)
+- **Phase truth = official controller timing** (`data/detector_plans.parquet`: `call_phase`, else `call_overlap`). Hand phase
+  labels are retired: never train or score phase on them; use them only to report agreement. The timing itself can
+  occasionally be wrong (detector programmed to the wrong phase) — rare; confident model-vs-official disagreements are
+  listed for a field check, not treated as model errors to be fixed.
+- **Function truth = hand-maintained config** (the newest version supersedes older files). No official function labels exist.
+- Output is a single label per detector: one phase OR one overlap. Additional call phases/overlaps, delay and extend are
+  metadata for diagnosis only, never model inputs.
+- Data downloads are one-time pulls for training. No polling, no new downloads unless the user asks.
+
 ## Reporting
 Each agent ends by writing `results\<stage>.md` (<= 60 lines: what was tried, table of numbers, what worked, what
 did not, surprises) and returning a summary under 500 words. Report failures honestly; never tune on TEST.

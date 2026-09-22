@@ -262,7 +262,6 @@
   "release_frac_long__pdiff",
   "call43_fwd_lift__pdiff"
  ],
- "n_estimators": 243,
  "params": {
   "objective": "lambdarank",
   "metric": "ndcg",
@@ -277,11 +276,24 @@
   "bagging_freq": 1,
   "lambda_l2": 1.0,
   "n_estimators": 1200,
-  "n_jobs": 8,
+  "n_jobs": 10,
   "verbose": -1,
   "label_gain": [
    0,
    1
   ]
- }
+ },
+ "n_models": 3,
+ "seeds": [
+  0,
+  1,
+  2
+ ],
+ "best_iterations": [
+  797,
+  413,
+  601
+ ],
+ "objective": "lambdarank",
+ "averaging": "mean of per-detector-normalised (softmax) probabilities"
 }

@@ -1,46 +1,57 @@
 """Detector phase + function inference: raw controller events in, one row per detector out.
 
+FINAL MODEL (`models/final_v1`, 2026-09-21).  See `docs/FINAL_REPORT.md`.
+
 Command line
 ------------
     python src/predict.py --events events.parquet --out preds.csv
     python src/predict.py --events day.parquet --device-ids <guid>,<guid> \
-        --start "2024-12-03 08:00:00" --end "2024-12-03 08:30:00" --out preds.csv
-    python src/predict.py --events events.csv --out preds.csv --odot-tiebreak
+        --start "2026-09-21 08:00:00" --end "2026-09-21 08:30:00" --out preds.csv
+    python src/predict.py --events events.parquet --out preds.csv \
+        --min-actuations 1 --min-prob 0.9        # the confidence-based service
 
 Python
 ------
     from predict import predict
-    out = predict(events_df_or_path, start=None, end=None, odot_tiebreak=False)
+    out = predict(events_df_or_path, start=None, end=None)
 
 `events` is a pandas DataFrame, a file path or a glob (parquet / csv) with the columns
 `DeviceId, Timestamp, EventId, Parameter` (the lowercase / underscore spellings
 `device_id, timestamp, event_id, parameter` are accepted too).  Any number of signals and
 any duration from a few minutes to days.  Everything else is rebuilt here: the allowed
 event codes are selected, `Parameter > 64` on 81/82 dropped, exact duplicate rows removed,
-then ON intervals, phase colour cycles, the green bitmask timeline, coordination state, the
-pair features, the cross-detector similarity graph, the phase ranker, the joint decoder and
-the function model.  No channel->phase table is used unless `odot_tiebreak=True`.
+then ON intervals, phase colour cycles (four colours, so the red-clearance interval a
+Yellow_Red detector is defined by can be measured), the green bitmask timeline,
+coordination state, the pair features, the cross-detector similarity and actuation-lag
+graphs, the 3-seed phase ranker, the joint decoder and the 5-class function model.
+No channel->phase table is used anywhere.
 
-Models are loaded from the repo folder `models/beta_v0/` by default.
+Models are loaded from the repo folder `models/final_v1/` by default:
+    phase_lgbm_v4_s{0,1,2}.txt   pair ranker, 3 seeds, averaged (stage 07)
+    decode_lgbm_v4.txt           joint per-signal decoder
+    function_lgbm_v4.txt         5-class function head
+This replaces the beta of 2026-09-17 (see the git history).
 
-Minimum evidence
-----------------
-A detector with fewer than `min_actuations` ON events in the sample does NOT get an answer:
-`phase_pred` / `function_pred` are blank and `status` says "not enough data: N actuations in
-sample (need >= MIN)".  The model's raw opinion is still returned in `phase_guess` /
-`function_guess` so nothing is lost.  The default (5) is the smallest minimum whose answered
-detectors stay within 1 point of the high-volume accuracy plateau on the DEV out-of-sample
-data (96.9 % vs 97.9 %); detectors with 5-19 actuations are answered but carry an
-"ok - low evidence" status and `review_flag`.  Pass `min_actuations=1` to always answer, or
-a higher value (10-20) for a stricter service.
+Minimum evidence -- two ways to refuse
+--------------------------------------
+* `min_actuations` (default 5): a detector with fewer than this many ON events in the
+  sample gets no answer.  `phase_pred` / `function_pred` are blank and `status` says
+  "not enough data: N actuations in sample (need >= MIN)".
+* `min_prob` (default 0.0 = off): a detector whose top phase probability is below this
+  gets no answer ("not confident enough: phase probability 0.62 (need >= 0.90)").
+
+Both rules are applied; the model's raw opinion is always kept in `phase_guess` /
+`function_guess`, so nothing is lost either way.  The default is the actuation rule alone.
+The measured alternative (`--min-actuations 1 --min-prob 0.9`) answers *more* detectors at
+*higher* accuracy, because a short sample can still be conclusive -- see the final report.
 
 Output columns
 --------------
 DeviceId, Detector, phase_pred, phase_prob, phase_2nd, phase_2nd_prob,
 function_pred, function_prob, status, review_flag, n_actuations, minutes_of_data,
-tiebreak_applied, and the extras phase_guess, phase_guess_prob, function_guess,
-function_guess_prob, phase_margin, p_advance, p_presence, p_count, n_candidate_phases,
-health_flag, review_reason.
+and the extras phase_guess, phase_guess_prob, function_guess,
+function_guess_prob, phase_margin, p_advance, p_presence, p_count, p_yellow_red,
+p_other, n_candidate_phases, health_flag, review_reason.
 """
 from __future__ import annotations
 
@@ -62,13 +73,13 @@ import cross_detector as cd  # noqa: E402
 import decode_v2 as dec  # noqa: E402
 import features as f1  # noqa: E402
 import features_v2 as f2  # noqa: E402
-import function_v2 as fv2  # noqa: E402
-from common import ALLOWED_EVENTS, FUNCTIONS, MAX_DETECTOR_CHANNEL  # noqa: E402
+import features_v3 as f3  # noqa: E402
+import function_v3 as fv3  # noqa: E402
+from common import ALLOWED_EVENTS, MAX_DETECTOR_CHANNEL  # noqa: E402
 from health import flag_detectors, status_for_user  # noqa: E402
-from tiebreak import apply_odot_tiebreak  # noqa: E402
 
 # repo-relative model folder -- no absolute user paths anywhere in the inference path
-DEFAULT_MODEL_DIR = Path(__file__).resolve().parents[1] / "models" / "beta_v0"
+DEFAULT_MODEL_DIR = Path(__file__).resolve().parents[1] / "models" / "final_v1"
 
 EV_LIST = ",".join(str(e) for e in ALLOWED_EVENTS)
 WIN = "infer"
@@ -83,20 +94,22 @@ NEEDED = ["DeviceId", "Timestamp", "EventId", "Parameter"]
 
 OUT_COLS = ["DeviceId", "Detector", "phase_pred", "phase_prob", "phase_2nd",
             "phase_2nd_prob", "function_pred", "function_prob", "status", "review_flag",
-            "n_actuations", "minutes_of_data", "tiebreak_applied"]
+            "n_actuations", "minutes_of_data"]
 EXTRA_COLS = ["phase_guess", "phase_guess_prob", "function_guess", "function_guess_prob",
-              "phase_margin", "p_advance", "p_presence", "p_count",
-              "n_candidate_phases", "health_flag", "review_reason"]
+              "phase_margin", "p_advance", "p_presence", "p_count", "p_yellow_red",
+              "p_other", "n_candidate_phases", "health_flag", "review_reason"]
 
 # Below this many detector ON events in the sample we refuse to answer (see module docstring).
 MIN_ACTUATIONS = 5
+# Below this top-phase probability we refuse to answer.  0.0 = rule disabled (the default).
+MIN_PROB = 0.0
 # answered, but thin enough to flag for review
 LOW_ACTUATIONS = 20
 LOW_MINUTES = 10.0
 LOW_CONF = 0.5
 
 _VERBOSE = False
-
+_LAG: pd.DataFrame | None = None        # detector-pair lag table, build_features -> function
 
 
 # ---- model backend: "lightgbm" (needs lightgbm + scipy) or "numpy" (pure numpy, identical output) ----
@@ -121,6 +134,18 @@ def _load_booster(path):
                 raise
     from lgbm_numpy import NumpyBooster
     return NumpyBooster(path)
+
+
+def _bag_files(model_dir: Path, stem: str, meta: dict) -> list[Path]:
+    """The K seed models of a bagged stage, or the single model if it is not bagged."""
+    n = int(meta.get("n_models", 1))
+    files = [model_dir / f"{stem}_s{i}.txt" for i in range(n)]
+    files = [f for f in files if f.exists()]
+    if not files and (model_dir / f"{stem}.txt").exists():
+        files = [model_dir / f"{stem}.txt"]
+    if not files:
+        raise FileNotFoundError(f"no {stem} model files in {model_dir}")
+    return files
 
 
 def log(m):
@@ -220,6 +245,8 @@ def build_chunk_tables(con) -> None:
 
     Colour cycles use 1 / 8 / 10 with 7 (green termination) and 9 (end yellow) as
     fall-backs, so controllers that log only 1 + 7 still get a usable green/red split.
+    A second, four-colour table (`cyc4_*`) additionally keeps **end red clearance
+    (event 11)** apart, which is what the Yellow_Red function features are measured on.
     """
     con.execute("""CREATE OR REPLACE TEMP TABLE devmap AS
         SELECT DeviceId, row_number() OVER (ORDER BY DeviceId)::SMALLINT AS dev
@@ -249,12 +276,14 @@ def build_chunk_tables(con) -> None:
                  min(t) FILTER (EventId=8)  AS yellow_ev,
                  min(t) FILTER (EventId=7)  AS green_term,
                  min(t) FILTER (EventId=10) AS red_ev,
-                 min(t) FILTER (EventId=9)  AS yellow_end
+                 min(t) FILTER (EventId=9)  AS yellow_end,
+                 min(t) FILTER (EventId=11) AS redclr_ev
           FROM g WHERE cyc > 0 AND p BETWEEN 1 AND 16 GROUP BY 1,2,3
         )
         SELECT DeviceId, p, cyc, green_start,
                coalesce(yellow_ev, green_term) AS yellow_start,
                coalesce(red_ev, yellow_end) AS red_start,
+               redclr_ev AS redclr_end,
                LEAD(green_start) OVER (PARTITION BY DeviceId, p ORDER BY green_start)
                    AS next_green
         FROM c WHERE green_start IS NOT NULL""")
@@ -266,6 +295,15 @@ def build_chunk_tables(con) -> None:
                epoch_ms(c.next_green)/1000.0 AS ng,
                (epoch_ms(coalesce(c.yellow_start, c.red_start) - c.green_start)/1000.0)::FLOAT
                    AS green_secs
+        FROM cyc_raw c JOIN devmap m USING (DeviceId)""")
+    con.execute("""CREATE OR REPLACE TEMP TABLE cyc4_all AS
+        SELECT m.dev, c.p, c.cyc::INT AS cyc,
+               epoch_ms(c.green_start)/1000.0 AS gs,
+               epoch_ms(coalesce(c.yellow_start, c.red_start, c.next_green))/1000.0 AS ge,
+               epoch_ms(coalesce(c.red_start, c.yellow_start, c.next_green))/1000.0 AS rs,
+               epoch_ms(coalesce(c.redclr_end, c.red_start, c.yellow_start,
+                                 c.next_green))/1000.0 AS rce,
+               epoch_ms(c.next_green)/1000.0 AS ng
         FROM cyc_raw c JOIN devmap m USING (DeviceId)""")
     con.execute("""CREATE OR REPLACE TEMP TABLE gs_all AS
         WITH iv AS (SELECT DeviceId, p, green_start AS t0,
@@ -359,6 +397,9 @@ EMPTY_SIM = pd.DataFrame({"DeviceId": pd.Series(dtype=object),
 
 
 def build_features(con, w0: float, w1: float):
+    """Pair features (stage 01 + v2 + v3 yellow/red-clearance), similarity and lag graphs."""
+    global _LAG
+    _LAG = None
     secs = max(w1 - w0, 1.0)
     f1.apply_window(con, w0, w1)
     base = f1.build_window(con, WIN, secs)
@@ -375,6 +416,25 @@ def build_features(con, w0: float, w1: float):
     df = f2.add_partner_diffs(df, f2.PDIFF_FEATS + ["on_lift_green", "occ_lift_green",
                                                     "f_on_green", "excl_diff_min",
                                                     "release_frac_long", "call43_fwd_lift"])
+    # ---- v3: yellow / red-clearance pair features + detector-pair actuation lags ----
+    dm = con.sql("SELECT * FROM devmap").df()
+    f3.window_cycles(con, w0, w1)
+    try:
+        yr = f3.build(con, WIN, dm, f3.SQL_YR).rename(
+            columns={"det": "Detector", "p": "cand_phase"})
+        yr["Detector"] = yr.Detector.astype(df.Detector.dtype)
+        yr["cand_phase"] = yr.cand_phase.astype(df.cand_phase.dtype)
+        df = df.merge(yr, on=["DeviceId", "Detector", "cand_phase", "win"], how="left")
+    except Exception as exc:                                       # pragma: no cover
+        log(f"yr features unavailable ({type(exc).__name__}: {exc})")
+    try:
+        lg = f3.build(con, WIN, dm, f3.SQL_LAG).rename(
+            columns={"det": "Detector", "oth": "other"})
+        lg["Detector"] = lg.Detector.astype(df.Detector.dtype)
+        lg["other"] = lg.other.astype(df.Detector.dtype)
+        _LAG = lg
+    except Exception as exc:                                       # pragma: no cover
+        log(f"lag features unavailable ({type(exc).__name__}: {exc})")
     return df, sim
 
 
@@ -393,54 +453,104 @@ def _normalise_by_detector(df: pd.DataFrame, s: np.ndarray) -> np.ndarray:
 
 
 def score(df: pd.DataFrame, sim: pd.DataFrame, model_dir: Path) -> pd.DataFrame:
-    meta = json.load(open(model_dir / "phase_lgbm_v2.json"))
-    bst = _load_booster(model_dir / "phase_lgbm_v2.txt")
+    """Stage 1: the seed-bagged pair ranker.  Stage 2: the joint per-signal decoder.
+
+    The K ranker seeds are averaged **after** each one is turned into a per-detector
+    probability -- exactly the averaging the training code measured (stage 07).
+    """
+    meta = json.load(open(model_dir / "phase_lgbm_v4.json"))
+    files = _bag_files(model_dir, "phase_lgbm_v4", meta)
     for c in meta["features"]:
         if c not in df.columns:
             df[c] = np.nan
     df = df.sort_values(["DeviceId", "Detector", "cand_phase"]).reset_index(drop=True)
-    df["p0"] = _softmax_by_detector(df, np.asarray(bst.predict(df[meta["features"]])))
+    X = df[meta["features"]]
+    ps = [_softmax_by_detector(df, np.asarray(_load_booster(f).predict(X))) for f in files]
+    df["p0"] = np.mean(ps, axis=0)
+    log(f"ranker: {len(files)} seed model(s) averaged")
 
-    dmeta = json.load(open(model_dir / "decode_lgbm_v2.json"))
-    dbst = _load_booster(model_dir / "decode_lgbm_v2.txt")
-    X = dec.assemble(df[["DeviceId", "Detector", "win", "cand_phase", "p0"]], pairs=df, sim=sim)
+    dmeta = json.load(open(model_dir / "decode_lgbm_v4.json"))
+    dbst = _load_booster(model_dir / "decode_lgbm_v4.txt")
+    Xd = dec.assemble(df[["DeviceId", "Detector", "win", "cand_phase", "p0"]],
+                      pairs=df, sim=sim)
     for c in dmeta["features"]:
-        if c not in X.columns:
-            X[c] = np.nan
-    sd = np.asarray(dbst.predict(X[dmeta["features"]]))
-    X["prob"] = (_normalise_by_detector(X, sd) if dmeta.get("mode") == "binary"
-                 else _softmax_by_detector(X, sd, dmeta.get("temperature", 1.0)))
-    return df.merge(X[["DeviceId", "Detector", "win", "cand_phase", "prob"]],
+        if c not in Xd.columns:
+            Xd[c] = np.nan
+    sd = np.asarray(dbst.predict(Xd[dmeta["features"]]))
+    Xd["prob"] = (_normalise_by_detector(Xd, sd) if dmeta.get("mode") == "binary"
+                  else _softmax_by_detector(Xd, sd, dmeta.get("temperature", 1.0)))
+    return df.merge(Xd[["DeviceId", "Detector", "win", "cand_phase", "prob"]],
                     on=["DeviceId", "Detector", "win", "cand_phase"], how="left")
 
 
+def _function_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """The function design matrix: the pair features of the detector's **predicted** phase,
+    plus shape, sibling-relative and cross-detector lag aggregates.  Identical code path to
+    training (`src/function_v4.py --stage frame`); no label and no phase number is used."""
+    pairs = df.drop(columns=["p0", "prob"], errors="ignore")
+    probs = df[["DeviceId", "Detector", "win", "cand_phase", "prob"]]
+    p = pairs.merge(probs, on=["DeviceId", "Detector", "win", "cand_phase"], how="inner")
+    i = p.groupby(["DeviceId", "Detector", "win"], sort=False)["prob"].idxmax()
+    top = p.loc[i].copy().rename(columns={"cand_phase": "pred_phase", "prob": "top_prob"})
+    top = fv3.add_shape_features(top)
+    top = fv3.add_sibling_features(top)
+    top = top.reset_index(drop=True)
+    if _LAG is not None and len(_LAG):
+        old = fv3._cat
+        fv3._cat = lambda files: _LAG           # feed the in-memory lag table
+        try:
+            top = fv3.add_lag_features(top)
+        finally:
+            fv3._cat = old
+    # the training frame carried a flag for the full-span window group (>= ~66 h);
+    # at inference the sample's own length decides it.
+    if "win_secs" in top.columns:
+        top["is_full"] = (top.win_secs.astype(float) >= 48 * 3600.0)
+    return top
+
+
 def score_function(df: pd.DataFrame, model_dir: Path) -> pd.DataFrame:
-    meta = json.load(open(model_dir / "function_lgbm_v2.json"))
-    bst = _load_booster(model_dir / "function_lgbm_v2.txt")
-    top = fv2.build_frame(df.drop(columns=["p0", "prob"], errors="ignore"),
-                          df[["DeviceId", "Detector", "win", "cand_phase", "prob"]])
+    """The 5-class head: Advance / Presence / Count / Yellow_Red / Other."""
+    meta = json.load(open(model_dir / "function_lgbm_v4.json"))
+    bst = _load_booster(model_dir / "function_lgbm_v4.txt")
+    classes = meta["classes"]
+    pcols = [f"p_{c.lower()}" for c in classes]
+    top = _function_frame(df)
     if not len(top):
-        return pd.DataFrame(columns=["DeviceId", "Detector", "p_advance", "p_presence",
-                                     "p_count", "function_pred", "function_prob"])
+        return pd.DataFrame(columns=["DeviceId", "Detector", "function_pred",
+                                     "function_prob"] + pcols)
     for c in meta["features"]:
         if c not in top.columns:
             top[c] = np.nan
-    P = fv2._apply_T(np.asarray(bst.predict(top[meta["features"]])), meta["temperature"])
+    Q = np.asarray(bst.predict(top[meta["features"]]))
     out = top[["DeviceId", "Detector"]].copy()
-    out[["p_advance", "p_presence", "p_count"]] = P
-    out["function_prob"] = P.max(1)
-    out["function_pred"] = np.where(P.max(1) < meta["other_threshold"], "Other",
-                                    np.array(FUNCTIONS)[P.argmax(1)])
+    out[pcols] = Q
+    pred = np.array(classes)[Q.argmax(1)]
+    # v3 shipped a rule that forced ambiguous Advance/Presence detectors to Other.  With an
+    # explicitly trained Other class it now costs accuracy, so it ships disabled; the
+    # parameters stay in the json for an operator who prefers Other recall to precision.
+    r = meta.get("advance_presence_rule", {})
+    if r.get("enabled"):
+        ia, ip = classes.index("Advance"), classes.index("Presence")
+        amb = (np.abs(Q[:, ia] - Q[:, ip]) < r.get("delta", 0.2)) & \
+              ((Q[:, ia] + Q[:, ip]) > r.get("sum_min", 0.6))
+        pred = np.where(amb, "Other", pred)
+    out["function_pred"] = pred
+    out["function_prob"] = Q.max(1)
     return out
 
 
 # ----------------------------------------------------------------- assembly
+PROB_COLS = ["p_advance", "p_presence", "p_count", "p_yellow_red", "p_other"]
+
+
 def _empty_result() -> pd.DataFrame:
     return pd.DataFrame(columns=OUT_COLS + EXTRA_COLS)
 
 
-def _assemble(univ, facts, hf, ph, fn, switched, model_note: str,
-              min_actuations: int = MIN_ACTUATIONS) -> pd.DataFrame:
+def _assemble(univ, facts, hf, ph, fn, model_note: str,
+              min_actuations: int = MIN_ACTUATIONS,
+              min_prob: float = MIN_PROB) -> pd.DataFrame:
     res = univ.merge(facts[["DeviceId", "minutes_of_data", "n_candidate_phases",
                             "n_green_end", "n_calls"]], on="DeviceId", how="left")
     if ph is not None and len(ph):
@@ -459,9 +569,10 @@ def _assemble(univ, facts, hf, ph, fn, switched, model_note: str,
 
     if fn is not None and len(fn):
         res = res.merge(fn, on=["DeviceId", "Detector"], how="left")
-    else:
-        for c in ("p_advance", "p_presence", "p_count", "function_prob"):
+    for c in PROB_COLS + ["function_prob"]:
+        if c not in res.columns:
             res[c] = np.nan
+    if "function_pred" not in res.columns:
         res["function_pred"] = pd.NA
 
     if hf is not None and len(hf):
@@ -502,6 +613,10 @@ def _assemble(univ, facts, hf, ph, fn, switched, model_note: str,
             st = (f"not enough data: {n} actuation" + ("" if n == 1 else "s") +
                   f" in sample (need >= {min_actuations})")
             rv, rs = True, "not enough data"
+        elif min_prob > 0 and (r.phase_prob or 0) < min_prob:
+            st = (f"not confident enough: phase probability "
+                  f"{float(r.phase_prob or 0):.2f} (need >= {min_prob:.2f})")
+            rv, rs = True, "not confident enough"
         else:
             rs = ""
             if (r.n_actuations or 0) < LOW_ACTUATIONS:
@@ -532,20 +647,15 @@ def _assemble(univ, facts, hf, ph, fn, switched, model_note: str,
     res["status"] = status
     res["review_flag"] = review
     res["review_reason"] = reason
-    # "cannot classify" / "not enough data" channels carry no answer -- only a guess
+    # refused channels carry no answer -- only a guess
     dead = (res.status.str.startswith("cannot classify") |
-            res.status.str.startswith("not enough data"))
+            res.status.str.startswith("not enough data") |
+            res.status.str.startswith("not confident enough"))
     res.loc[dead, ["phase_pred", "phase_prob", "phase_2nd", "phase_2nd_prob",
-                   "function_pred", "function_prob", "p_advance", "p_presence",
-                   "p_count", "phase_margin"]] = np.nan
+                   "function_pred", "function_prob", "phase_margin"] + PROB_COLS] = np.nan
     if model_note:
         res["status"] = res.status + "; " + model_note
 
-    swk = set(switched.DeviceId.astype(str) + "|" + switched.Detector.astype(str)) \
-        if switched is not None and len(switched) else set()
-    res["tiebreak_applied"] = (res.DeviceId.astype(str) + "|" +
-                               res.Detector.astype(str)).isin(swk)
-    res.loc[res.phase_pred.isna(), "tiebreak_applied"] = False
     for c in ("phase_pred", "phase_2nd", "phase_guess"):
         res[c] = res[c].astype("Int64")
     res["n_actuations"] = res.n_actuations.fillna(0).astype("Int64")
@@ -555,10 +665,11 @@ def _assemble(univ, facts, hf, ph, fn, switched, model_note: str,
 
 
 # ---------------------------------------------------------------- entry points
-def predict(events, start=None, end=None, odot_tiebreak: bool = False,
+def predict(events, start=None, end=None,
             device_ids=None, model_dir=None, threads: int = 4, memory: str = "4GB",
             chunk_signals: int | None = None, verbose: bool = False,
-            min_actuations: int = MIN_ACTUATIONS) -> pd.DataFrame:
+            min_actuations: int = MIN_ACTUATIONS,
+            min_prob: float = MIN_PROB) -> pd.DataFrame:
     """Raw hi-res events -> one row per detector channel.  Never raises on thin data.
 
     Parameters
@@ -566,22 +677,23 @@ def predict(events, start=None, end=None, odot_tiebreak: bool = False,
     events         pandas DataFrame, or a path / glob to parquet or csv, with columns
                    DeviceId, Timestamp, EventId, Parameter (lowercase variants accepted).
     start, end     optional timestamp strings; `end` is exclusive.
-    odot_tiebreak  turn on the ODOT standard-wiring tie-breaker (post-processing only).
     chunk_signals  process the signals in groups of this many to bound peak memory.
-    min_actuations below this many detector ON events no answer is given (the model's raw
-                   opinion is still returned in phase_guess / function_guess).
+    min_actuations below this many detector ON events no answer is given.
+    min_prob       below this top-phase probability no answer is given (0 = off).
+                   The model's raw opinion is kept in phase_guess / function_guess.
     """
     global _VERBOSE
     _VERBOSE = verbose
     model_dir = Path(model_dir) if model_dir else DEFAULT_MODEL_DIR
-    if not (model_dir / "phase_lgbm_v2.txt").exists():
+    if not (model_dir / "phase_lgbm_v4.json").exists():
         raise FileNotFoundError(f"no models in {model_dir}")
 
     if chunk_signals:
         ids = device_ids or list_signals(events, start, end, threads, memory)
         if len(ids) > chunk_signals:
-            parts = [predict(events, start, end, odot_tiebreak, ids[i:i + chunk_signals],
-                             model_dir, threads, memory, None, verbose, min_actuations)
+            parts = [predict(events, start, end, ids[i:i + chunk_signals],
+                             model_dir, threads, memory, None, verbose, min_actuations,
+                             min_prob)
                      for i in range(0, len(ids), chunk_signals)]
             parts = [p for p in parts if len(p)]
             return (pd.concat(parts, ignore_index=True) if parts else _empty_result())
@@ -604,7 +716,6 @@ def predict(events, start=None, end=None, odot_tiebreak: bool = False,
             df, sim = None, None
             note = f"feature build failed ({type(exc).__name__})"
         ph = fn = None
-        switched = pd.DataFrame(columns=["DeviceId", "Detector"])
         if df is not None and len(df):
             log(f"features {df.shape}, similarity {sim.shape}")
             df = score(df, sim, model_dir)
@@ -612,13 +723,12 @@ def predict(events, start=None, end=None, odot_tiebreak: bool = False,
             s = ph.groupby(["DeviceId", "Detector"])["prob"].transform("sum")
             ph["prob"] = ph.prob / s.replace(0, np.nan)
             ph = ph.dropna(subset=["prob"])
-            ph, switched = apply_odot_tiebreak(ph, enabled=odot_tiebreak, return_flags=True)
             try:
                 fn = score_function(df, model_dir)
             except Exception as exc:                              # pragma: no cover
                 note = (note + "; " if note else "") + \
                     f"function model unavailable ({type(exc).__name__})"
-        return _assemble(univ, facts, hf, ph, fn, switched, note, min_actuations)
+        return _assemble(univ, facts, hf, ph, fn, note, min_actuations, min_prob)
     finally:
         con.close()
 
@@ -642,13 +752,14 @@ def list_signals(events, start=None, end=None, threads: int = 2,
 
 
 def run(events: str, out: str, device_ids=None, start=None, end=None,
-        odot_tiebreak: bool = False, model_dir=None, threads: int = 4,
+        model_dir=None, threads: int = 4,
         memory: str = "4GB", chunk_signals: int | None = None,
-        min_actuations: int = MIN_ACTUATIONS) -> pd.DataFrame:
+        min_actuations: int = MIN_ACTUATIONS,
+        min_prob: float = MIN_PROB) -> pd.DataFrame:
     """CLI helper: predict and write a CSV."""
     t0 = time.time()
-    res = predict(events, start, end, odot_tiebreak, device_ids, model_dir, threads,
-                  memory, chunk_signals, True, min_actuations)
+    res = predict(events, start, end, device_ids, model_dir, threads,
+                  memory, chunk_signals, True, min_actuations, min_prob)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     res.to_csv(out, index=False)
     print(f"wrote {out}: {len(res)} detectors, "
@@ -665,9 +776,6 @@ def main() -> None:
     ap.add_argument("--device-ids", default=None, help="comma separated DeviceId filter")
     ap.add_argument("--start", default=None)
     ap.add_argument("--end", default=None, help="exclusive")
-    ap.add_argument("--odot-tiebreak", action="store_true",
-                    help="post-process close concurrent-pair ties with the ODOT standard "
-                         "wiring table at signals that look standard-wired (default off)")
     ap.add_argument("--models", default=str(DEFAULT_MODEL_DIR))
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--memory", default="4GB")
@@ -679,12 +787,16 @@ def main() -> None:
                     help="below this many detector ON events in the sample, report "
                          "'not enough data' instead of an answer (default %(default)s; "
                          "use 1 to always answer)")
+    ap.add_argument("--min-prob", type=float, default=MIN_PROB,
+                    help="below this top-phase probability, report 'not confident enough' "
+                         "instead of an answer (default %(default)s = off; the measured "
+                         "alternative service is --min-actuations 1 --min-prob 0.9)")
     a = ap.parse_args()
     if a.no_lightgbm:
         set_backend("numpy")
     ids = [s.strip() for s in a.device_ids.split(",")] if a.device_ids else None
-    run(a.events, a.out, ids, a.start, a.end, a.odot_tiebreak, Path(a.models),
-        a.threads, a.memory, a.chunk_signals, a.min_actuations)
+    run(a.events, a.out, ids, a.start, a.end, Path(a.models),
+        a.threads, a.memory, a.chunk_signals, a.min_actuations, a.min_prob)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Smoke tests for the shippable inference package.
+"""Smoke tests for the shippable inference package (`src/predict.py` + `models/final_v1`).
 
     pytest tests/test_predict_smoke.py          # or
     python  tests/test_predict_smoke.py
@@ -17,9 +17,11 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from predict import MIN_ACTUATIONS, OUT_COLS, predict  # noqa: E402
+from predict import (DEFAULT_MODEL_DIR, EXTRA_COLS, MIN_ACTUATIONS,  # noqa: E402
+                     OUT_COLS, PROB_COLS, predict)
 
 SAMPLE = Path(__file__).resolve().parent / "data" / "sample_events.parquet"
+CLASSES = ["Advance", "Presence", "Count", "Yellow_Red", "Other"]
 
 
 def _events() -> pd.DataFrame:
@@ -33,23 +35,40 @@ def test_sample_exists():
     assert len(ev) > 1000
 
 
+def test_models_present():
+    for f in ("phase_lgbm_v4.json", "phase_lgbm_v4_s0.txt", "decode_lgbm_v4.txt",
+              "function_lgbm_v4.txt", "model_card.json"):
+        assert (DEFAULT_MODEL_DIR / f).exists(), f"missing {DEFAULT_MODEL_DIR / f}"
+
+
 def test_predict_from_path():
     out = predict(SAMPLE)
     assert len(out) > 0
-    assert list(out.columns)[:len(OUT_COLS)] == OUT_COLS
+    assert list(out.columns) == OUT_COLS + EXTRA_COLS
     assert out.DeviceId.nunique() == 1
     assert out.Detector.is_unique
     answered = out[out.phase_pred.notna()]
     assert len(answered) > 0, "no detector got an answer in the sample"
     assert (answered.n_actuations >= MIN_ACTUATIONS).all()
     assert answered.phase_prob.between(0, 1).all()
-    assert answered.function_pred.isin(["Advance", "Presence", "Count", "Other"]).all()
+    assert answered.function_pred.isin(CLASSES).all()
     assert not answered.status.str.startswith(("cannot classify", "not enough data")).any()
     dead = out[out.status.str.startswith(("cannot classify", "not enough data"))]
     assert dead.phase_pred.isna().all() and dead.function_pred.isna().all()
+    assert dead[PROB_COLS].isna().all().all()
     assert dead.review_flag.all()
     assert (out.minutes_of_data > 25).all() and (out.minutes_of_data < 35).all()
-    assert not out.tiebreak_applied.any()   # default OFF
+
+
+def test_five_class_probabilities_sum_to_one():
+    out = predict(SAMPLE)
+    ans = out[out.function_pred.notna()]
+    assert len(ans) > 0
+    for c in PROB_COLS:
+        assert ans[c].between(0, 1).all()
+    assert (ans[PROB_COLS].sum(1) - 1).abs().max() < 1e-6
+    # function_prob is the winning class probability
+    assert (ans[PROB_COLS].max(1) - ans.function_prob).abs().max() < 1e-9
 
 
 def test_minimum_evidence_rule():
@@ -70,6 +89,23 @@ def test_minimum_evidence_rule():
     assert strict.phase_guess.notna().sum() == lenient.phase_pred.notna().sum()
 
 
+def test_min_prob_refusal():
+    """The alternative refusal rule: refuse on confidence, not on actuation count."""
+    base = predict(SAMPLE, min_actuations=1)
+    conf = predict(SAMPLE, min_actuations=1, min_prob=0.9)
+    assert conf.phase_pred.notna().sum() <= base.phase_pred.notna().sum()
+    kept = conf[conf.phase_pred.notna()]
+    assert (kept.phase_prob >= 0.9).all()
+    refused = conf[conf.status.str.startswith("not confident enough")]
+    if len(refused):
+        assert refused.phase_pred.isna().all()
+        assert refused.phase_guess.notna().all()
+        assert (refused.phase_guess_prob < 0.9).all()
+        assert refused.review_flag.all()
+    # min_prob = 0 (the default) changes nothing
+    pd.testing.assert_frame_equal(base, predict(SAMPLE, min_actuations=1, min_prob=0.0))
+
+
 def test_low_evidence_warning():
     out = predict(SAMPLE)
     low = out[out.status.str.startswith("ok - low evidence")]
@@ -84,11 +120,6 @@ def test_predict_from_dataframe_lowercase():
     b = predict(SAMPLE)
     pd.testing.assert_frame_equal(a, b)
 
-
-def test_odot_tiebreak_runs():
-    out = predict(SAMPLE, odot_tiebreak=True)
-    assert len(out) > 0
-    assert out.tiebreak_applied.dtype == bool
 
 
 def test_one_minute_window_degrades_gracefully():
@@ -127,6 +158,15 @@ def test_no_calls_43_44():
     assert out.phase_pred.notna().any()
 
 
+def test_no_yellow_or_red_clearance():
+    """Six codes only (1, 7, 43, 44, 81, 82): Yellow_Red cannot be seen, must not crash."""
+    ev = _events()
+    ev = ev[ev.EventId.isin([1, 7, 43, 44, 81, 82])]
+    out = predict(ev)
+    assert len(out) > 0
+    assert out.phase_pred.notna().any()
+
+
 def test_one_minute_window_answers_little_but_keeps_guesses():
     ev = _events()
     t0 = ev.Timestamp.min()
@@ -138,7 +178,7 @@ def test_one_minute_window_answers_little_but_keeps_guesses():
 def test_empty_selection():
     out = predict(SAMPLE, start="2030-01-01", end="2030-01-02")
     assert len(out) == 0
-    assert list(out.columns)[:len(OUT_COLS)] == OUT_COLS
+    assert list(out.columns) == OUT_COLS + EXTRA_COLS
 
 
 def test_chunked_matches_unchunked():
