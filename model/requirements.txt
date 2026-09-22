@@ -1,0 +1,12 @@
+# Everything model/predict.py needs. CPU only; no torch, no sklearn, no scipy.
+duckdb>=1.0
+pandas>=2.0
+numpy>=1.24
+pyarrow>=14.0
+onnxruntime>=1.17
+# onnxruntime is REQUIRED: the neural half of the model (weights/gru.onnx) is evaluated
+# by gru_onnx.py and there is no second runtime and no fallback.
+#
+# Optional: lightgbm>=4.0 (which pulls in scipy). If it is not installed, predict.py
+# scores the same model files with the built-in pure-numpy tree evaluator
+# (lgbm_numpy.py) - identical output, same speed.

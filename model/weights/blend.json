@@ -1,0 +1,9 @@
+{
+ "weight_lightgbm": 0.5,
+ "where": "before",
+ "cutoff_minutes": 120,
+ "runtime": "onnx",
+ "weights_file": "gru.onnx",
+ "chunk_minutes": 30,
+ "note": "Frozen on out-of-fold predictions of the 701 training signals before the locked test signals were opened a second time. weight_lightgbm is the weight on the 3-seed LightGBM pair ranker, 1 - weight on the GRU; 'before' means the two are averaged as per-detector probabilities and the joint decoder then runs on the mixture; above cutoff_minutes of data the network is not run at all. A sample is scored in pieces of at most chunk_minutes and the pieces are pooled by the mean log-probability. The network runs with onnxruntime on the CPU (model/gru_onnx.py) - the only runtime, no fallback."
+}

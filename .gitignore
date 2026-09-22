@@ -1,6 +1,8 @@
-# data, weights, and results are not versioned
+# Working data is never versioned: event logs, caches, feature tables, predictions,
+# label files and anything pulled from an agency system.
 data/
 archive/
+review/
 .tmp/
 *.parquet
 *.duckdb
@@ -12,24 +14,17 @@ __pycache__/
 .ipynb_checkpoints/
 .venv/
 
-# --- but the shippable beta package IS versioned ---
-!models/
-!models/**
-!tests/
-!tests/data/
-!tests/data/**
-!docs/img/
-!docs/img/**
+# --- but the shipped model IS versioned, including its weights and bundled sample ---
+!model/
+!model/**
+model/**/__pycache__/
 
-# --- the manual-review package for the user (GUIDs, channel numbers, labels, model outputs only) ---
+# --- and so are the research charts ---
+!research/charts/
+!research/charts/**
 
-# not redistributed / old notebook with saved outputs
-docs/*.pdf
-baseline/*.ipynb
+# third-party document, kept locally for reference, not redistributed
+research/notes/*.pdf
 
-# ODOT-specific staging download code: never committed
-src/download/
-
-# research candidates (only models/final_v1 ships) and ODOT staff review files (not published)
-models/*candidate*/
-review/
+# agency-specific download code: never committed
+research/code/download/
