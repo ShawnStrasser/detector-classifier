@@ -20,7 +20,7 @@ Background review of the 2024-25 work: [docs/research_review_2026-09.md](docs/re
 | `src/predict.py` | the only file an integrator needs: raw events → one row per detector |
 | `models/final_v1/` | the shipped models (3-seed phase ranker, joint decoder, 5-class function head) + `model_card.json` |
 | `docs/` | final report, beta report, research protocol, Indiana hi-res enumerations PDF, charts |
-| `results/` | one short note per research stage (00 … 11) |
+| `results/` | one short note per research stage (00 … 12) |
 | `tests/` | smoke tests, phase-number-invariance test, numpy-backend equality test |
 | `data/raw/` | `Train_Dec_{2,3,4}_2024.parquet` - 3 days, 421 signals (DeviceId, Timestamp, EventId, Parameter); `detector-configs.csv` hand labels |
 | `data/splits/` | `device_id_train.csv` (337), `device_id_valid.csv` (38), `test_config.csv` (43 locked signals) |

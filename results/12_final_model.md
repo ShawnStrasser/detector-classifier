@@ -54,9 +54,10 @@ run was made with the ODOT tie-breaker ON so that both columns could be read fro
 ever exchanges the top two candidates' probabilities, so the OFF answer is recovered exactly by
 swapping them back); **the shipped `predict.py` no longer contains the tie-breaker at all** — the
 "tb on" column below is what it *would* have given, and is why it was dropped. The frozen beta was run
-on **identical rows** through a copy of its own entry point (since removed; restore
-`src/predict_beta_v0.py` from git history to reproduce that arm). Headline = detectors with >=5
-actuations whose official phase turns green in the window.
+on **identical rows** through a copy of its own entry point and models; both have since been removed
+from the repo (restore `src/predict_beta_v0.py` and `models/beta_v0/` from git history to reproduce
+that arm — its predictions are already saved under `dc_work/preds/final_test_DO_NOT_USE/`).
+Headline = detectors with >=5 actuations whose official phase turns green in the window.
 
 | set | window | **final** | beta | final non-std | beta non-std | final err / concurrent | beta err |
 |---|---|---|---|---|---|---|---|

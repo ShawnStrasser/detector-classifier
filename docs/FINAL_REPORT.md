@@ -185,6 +185,9 @@ maximum difference 0.0).
 
 ## 5. For ODOT staff — what the labels themselves told us
 
+The files named here are in the working folder `review/` and are **not published with the code** (they
+carry device IDs and internal channel descriptions); they are handed over directly.
+
 * **Hand-maintained config vs controller timing: 97.2 % agree** — 151 of 5,469 shared channels differ,
   and the disagreement is stable over 21 months, so it is label noise, not config drift. Full comparison:
   `review/hand_vs_timing_discrepancies.xlsx`.
