@@ -75,7 +75,7 @@ anything ships.
 
 ## Future work — a four-week greedy search
 
-Two tracks. **Function first** (its accuracy is the weak half and most of its gap is labels and
+State of play is in `research/STATUS.md` — read it first. Two tracks. **Function first** (its accuracy is the weak half and most of its gap is labels and
 per-lane structure, not model capacity), then the **neural track** for short-sample phase accuracy.
 Budget: one RTX A1000 (8 GB), about **2–3 full fold-runs a day**; one fold is ~50 min for a TCN and
 ~90 min for the GRU. **Screening rule:** try the cheapest version first (CPU, one fold); promote to
@@ -126,8 +126,10 @@ A2. **Expert-shaped features** (phase-anonymous, per detector and per pair of de
     spill-back events late in red. One CPU retrain of the function model; ablate.
 A3. **Per-lane / per-phase joint decoding for function.** Group a phase's detectors into lanes
     from timing correlation + zero-lag co-location (no lane labels needed); then assign roles as a
-    constrained problem: <= 1 Presence, <= 1 Count, <= 1 Advance per lane, Yellow_Red may span
-    lanes, everything left over is Other. Output `n_lanes` per phase as a by-product. Evaluate
+    constrained problem: <= 1 Presence, <= 1 Count, <= 1 Advance **per lane** (a phase has 1–3
+    lanes, usually 1–2 — two presence zones on a phase is NOT a violation, it means two lanes),
+    Yellow_Red may span lanes, everything left over is Other. 44 signals carry RL/CL/LL lane text
+    in the channel description: use them to validate the lane grouping. Output `n_lanes` per phase as a by-product. Evaluate
     with and without; report how often the inferred lane count is plausible. If the user later
     supplies lane-count labels, use them to validate, never as an input.
 A4. **"Other" as rejection, not a class.** Train Advance/Presence/Count/Yellow_Red only; call
