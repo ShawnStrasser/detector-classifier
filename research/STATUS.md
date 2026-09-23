@@ -67,6 +67,13 @@ B2 → B3 → B4 per `AGENTS.md`. Note file for the track: `research/notes/15_ne
 * Whether lane-count labels can be pulled (or whether the RL/CL/LL text is enough).
 * Whether the +0.16 pt expert features ship (recommendation: yes, with the next function retrain).
 
+## Parked ideas (user's, not yet tried)
+
+* **Preload the training rasters into GPU memory.** The TCN is small (700 k params, ~2 GB used of
+  8 GB) and GPU utilisation drops to 0 % between steps while the CPU builds batches — training is
+  data-bound, not compute-bound. Building each fold's rasters once and keeping them resident on the
+  GPU could cut epoch time substantially. Try when GPU throughput becomes the bottleneck.
+
 ## Never forget
 
 Locked signals (43 TEST + 143 NEWTEST, paths in `AGENTS.md`) are never trained/tuned on. One-time
