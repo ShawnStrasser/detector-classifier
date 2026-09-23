@@ -26,5 +26,10 @@ _dirs = [CODE, MODEL] + sorted(p for p in CODE.rglob("*")
                                if p.is_dir() and p.name != "__pycache__")
 for _d in reversed(_dirs):          # so CODE and MODEL end up first
     _s = str(_d)
-    if _s not in sys.path:
-        sys.path.insert(0, _s)
+    # re-insert rather than skip: the caller has already put CODE on the path itself
+    # (that is how this module was found), and merely skipping it would leave CODE
+    # *behind* MODEL, so `import common` would find the production module instead of
+    # the research one.
+    if _s in sys.path:
+        sys.path.remove(_s)
+    sys.path.insert(0, _s)
