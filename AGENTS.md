@@ -75,37 +75,86 @@ anything ships.
 
 ## Future work — a four-week greedy search
 
+Two tracks. **Function first** (its accuracy is the weak half and most of its gap is labels and
+per-lane structure, not model capacity), then the **neural track** for short-sample phase accuracy.
 Budget: one RTX A1000 (8 GB), about **2–3 full fold-runs a day**; one fold is ~50 min for a TCN and
-~90 min for the GRU. **Screening rule:** train **one fold first** (~1.5 h), and promote a candidate
-to all six folds only if it beats the noise floor by **>= 0.3 pt at 30 minutes**. Anything that does
-not is dropped, not tuned.
+~90 min for the GRU. **Screening rule:** try the cheapest version first (CPU, one fold); promote to
+all six folds only if it beats the noise floor by **>= 0.3 pt** (phase, 30 min) or **>= 1 pt**
+(function). Anything that does not is dropped, not tuned.
 
-In order, best expected value per hour first:
+### Track A — function (CPU, days not weeks)
 
-1. **Swap the GRU backbone for the TCN.** They tie on accuracy and the TCN trains and runs about
-   twice as fast. Do this first: it buys the compute for everything below. ~1 fold to confirm.
-2. **Seed-ensemble the network.** Free — the fold models already exist. Averaging damps the
-   0.1–0.45 pt seed noise the same way bagging did for the trees.
-3. **Dropout and augmentation** (random time shifts, channel dropout). The net currently has
-   neither, and it is the cheapest regularisation left. ~2 folds.
-4. **Mixed sample lengths in network training** (5 min … 6 h). Worth +6 pt for the trees; the net is
-   still trained on 5–30 min only. ~3 folds.
-5. **Give the network sibling-detector context** — the joint-decoder idea, inside the network.
-   Biggest expected gain and the most work: the input has to carry the other channels of the signal.
-   Budget a week.
-6. **Add the TCN to the blend alongside the GRU.** Three different readings, cheap once (1) is done.
-7. **Mamba / state-space backbone.** Uncertain payoff and a real risk of a Windows CUDA build
-   fight. Time-box it.
-8. **Stack the LightGBM scores or features into the net, or the net's into the trees.** One careful
-   test only — the overfitting risk here is high and out-of-fold hygiene is easy to get wrong.
-9. **LightGBM: neighbour-trace summary features.** Hand-built versions of what (5) would learn.
-10. **Wider / deeper network.** Last, and only if the data has grown.
+The user's review of the 79 function misses on the 143 locked signals (`review/`; his corrections
+are the truth from now on) showed **37 of 79 labels were wrong**; with corrected labels function
+accuracy is 86.8 %, not 75.5 %, before any retraining. Corrected labels: `research/labels/`
+(built by A1). His domain definitions (use them as FEATURES, never as override rules):
+
+* **Count**: small zone at the stop bar; off during red, pulses during green. Usually set to *pulse*
+  (every ON lasts exactly one 0.1 s tick); sometimes *normal* (ON for the whole vehicle passage).
+* **Yellow_Red**: same location as Count, but with a ~5 mph speed filter, so it misses vehicles
+  starting from a stop — expect it to miss the first car(s) of green. Often ONE detector spanning
+  all lanes to save inputs.
+* **Presence**: ~20 ft zone at the stop bar; occupied through red; turns off late in green once the
+  queue has cleared.
+* **Advance**: a count zone far upstream; random arrivals regardless of colour when free, platoons
+  during green when coordinated. Queue spill-back over it happens only well into red. Set to pulse
+  or normal.
+* **Other** (not classified, but must be recognised): ETA zones (on while a vehicle is 3–5 s out),
+  extension zones spanning both lanes between the advance loops and the stop bar, bike loops,
+  departure zones ("makes sense these look like count zones"), long advance-presence zones.
+* **Lane structure**: two lane-by-lane advance loops + one closer loop spanning both lanes
+  correlate tightly at low volume and *diverge at peak* (two side-by-side vehicles = 2 actuations on
+  the pair, 1 on the spanning loop). Long zones plateau in the day; count zones do not. Two count
+  zones on a phase ⇒ two lanes ⇒ at most two presence and two Yellow_Red zones. An advance
+  actuation is followed a few seconds later by the presence actuation in the same lane. Coordination
+  is only detectable over ~a day (coord by day, free at night).
+
+Ordered steps (each ends with a note in `research/notes/`):
+
+A1. **Corrected labels + scoring fix.** Fold the user's corrections into the function label table
+    (rows marked `?` are dropped from training and scoring; Bike/Departure map to Other). Fix the
+    phase scorer to accept the timing's `switch_phase` and `additional_call_phases` as correct
+    (e.g. a detector that calls 5 and switches to 4). Re-score final_v2. Re-run the confident
+    function-disagreement list on ALL labelled signals (not only the locked ones) for the next
+    review round — the label file is the ceiling.
+A2. **Expert-shaped features** (phase-anonymous, per detector and per pair of detectors on the
+    same predicted phase): pulse signature (share of ONs = one tick; duration bimodality); first-
+    actuation lag after begin-green vs a co-located detector (Yellow_Red misses the first car);
+    zero-lag co-location vs several-second lead (advance → presence); 15-min-count correlation
+    off-peak vs peak and its divergence (spanning-lane loops); daytime count plateau vs linear
+    growth; arrival randomness (Poisson index) split by coord/free where the sample is >= 1 day;
+    spill-back events late in red. One CPU retrain of the function model; ablate.
+A3. **Per-lane / per-phase joint decoding for function.** Group a phase's detectors into lanes
+    from timing correlation + zero-lag co-location (no lane labels needed); then assign roles as a
+    constrained problem: <= 1 Presence, <= 1 Count, <= 1 Advance per lane, Yellow_Red may span
+    lanes, everything left over is Other. Output `n_lanes` per phase as a by-product. Evaluate
+    with and without; report how often the inferred lane count is plausible. If the user later
+    supplies lane-count labels, use them to validate, never as an input.
+A4. **"Other" as rejection, not a class.** Train Advance/Presence/Count/Yellow_Red only; call
+    Other when no class is confident OR the detector's features are far from the training
+    distribution (e.g. isolation-forest / kNN distance on the feature vector). Score on held-out
+    Other *subtypes* the model was never shown (leave one subtype out) — that is the property a
+    trained Other class cannot have. Ship whichever wins on the corrected labels.
+
+### Track B — phase on short samples (GPU)
+
+B1. **Swap the GRU backbone for the TCN** (ties on accuracy, ~2× faster training and inference);
+    one fold to confirm, then it is the backbone for everything below.
+B2. **Seed-ensemble the network** — fold models exist; free.
+B3. **Dropout + augmentation** (time shifts, channel dropout). The net has neither. ~2 folds.
+B4. **Mixed sample lengths in network training** (5 min … 6 h). ~3 folds.
+B5. **Sibling-detector context inside the network** (the joint-decoder idea). Biggest expected
+    gain, most work; budget a week.
+B6. **Add the TCN to the blend** alongside/instead of the GRU.
+B7. **Mamba / state-space backbone.** Time-boxed; Windows CUDA build risk.
+B8. **Stacking** LightGBM ⇄ network. One careful test; overfitting risk.
+B9. **LightGBM neighbour-trace summary features** (hand-built version of B5).
+B10. Wider / deeper network, last.
 
 **Do not retry:** Optuna on the trees, XGBoost / CatBoost / forests, peak-vs-off-peak contrast
-features, detector-health masking, overlaps as a class, delay / extend settings, or a transformer at
-this data size. All were measured and all failed; the notes say why.
+features for phase, detector-health masking, overlaps as a class, delay / extend settings, a
+transformer at this data size. All measured, all failed; the notes say why.
 
-**Stop rule.** Decide everything on the held-out folds. When a candidate wins there, run **one**
-confirmation on the locked signals and change nothing afterwards — and state plainly in the note
-that those exam signals have now been opened a third time, so the confirmation is a sanity check,
-not an independent estimate.
+**Stop rule.** Decide everything on held-out folds. When a candidate wins there, run **one**
+confirmation on the locked signals and change nothing afterwards — and say in the note that the
+exam signals have been opened again, so it is a sanity check, not an independent estimate.
