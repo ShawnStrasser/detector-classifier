@@ -140,8 +140,9 @@ A4. **"Other" as rejection, not a class.** Train Advance/Presence/Count/Yellow_R
 
 ### Track B — phase on short samples (GPU)
 
-B1. **Swap the GRU backbone for the TCN** (ties on accuracy, ~2× faster training and inference);
-    one fold to confirm, then it is the backbone for everything below.
+B1. DONE — **TCN is the research backbone** (ties the GRU in the blend, 11× faster to train). It
+    is for exploration only, NOT a shipping decision: at the end of the search the winning set-up
+    is re-fitted with a GRU backbone as well and the two are compared before anything ships.
 B2. **Seed-ensemble the network** — fold models exist; free.
 B3. **Dropout + augmentation** (time shifts, channel dropout). The net has neither. ~2 folds.
 B4. **Mixed sample lengths in network training** (5 min … 6 h). ~3 folds.
@@ -157,6 +158,8 @@ B10. Wider / deeper network, last.
 features for phase, detector-health masking, overlaps as a class, delay / extend settings, a
 transformer at this data size. All measured, all failed; the notes say why.
 
-**Stop rule.** Decide everything on held-out folds. When a candidate wins there, run **one**
+**Nothing ships during the search.** `model/` stays at final_v2 until every track is finished.
+
+**Stop rule (end of search only).** Decide everything on held-out folds. When a candidate wins there, run **one**
 confirmation on the locked signals and change nothing afterwards — and say in the note that the
 exam signals have been opened again, so it is a sanity check, not an independent estimate.

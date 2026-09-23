@@ -82,8 +82,8 @@ signals, not a fold model.
    586 rows, 193 signals): merge into the override table, retrain the function head on corrected
    labels **with** the expert features (`dc_work\trackA\models\function_v5_expert\`), re-score.
 3. Lane structure, done right (per-lane rule, 1–3 lanes; validate on the RL/CL/LL signals).
-4. Ship a `final_v3` only via the stop rule in `AGENTS.md` (held-out folds decide; one locked
-   confirmation; say the exam signals were opened again).
+4. Only after ALL of the above: re-fit the best configuration with a GRU backbone too, compare,
+   and then — and only then — propose a `final_v3` via the stop rule in `AGENTS.md`.
 
 ## Decisions pending from the user
 
